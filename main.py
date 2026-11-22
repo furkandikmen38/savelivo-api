@@ -1,4 +1,6 @@
-"""SaveLivo API MVP: demo + allowlisted direct media links only.
+"""SaveLivo API MVP: demo + allowlisted direct media links.
+
+Version 0.2 adds an explicitly approved, public CC0 MP4 test host.
 
 No login, DRM, private post extraction, or social platform scraping.
 """
@@ -30,10 +32,13 @@ MAX_SIZE = 40 * 1024 * 1024
 MEDIA_EXT = {"mp4", "webm", "mp3", "m4a", "mov", "ogg"}
 MIME = {"mp4": "video/mp4", "webm": "video/webm", "mp3": "audio/mpeg", "m4a": "audio/mp4", "mov": "video/quicktime", "ogg": "audio/ogg"}
 ALLOWED_HOSTS = {x.strip().lower() for x in os.getenv("ALLOWED_MEDIA_HOSTS", "super-selkie-f65d2d.netlify.app").split(",") if x.strip()}
+# Bu kaynak sadece halka acik, CC0 lisansli dogrudan MP4 testi icin eklenmistir.
+# Rastgele alan adlarini acmayin: indirme endpointi bir vekil sunucudur.
+ALLOWED_HOSTS.add("interactive-examples.mdn.mozilla.net")
 CORS_ORIGINS = [x.strip() for x in os.getenv("CORS_ORIGINS", "https://super-selkie-f65d2d.netlify.app").split(",") if x.strip()]
 SECRET = os.getenv("DOWNLOAD_TOKEN_SECRET", "").encode("utf-8") or secrets.token_bytes(32)
 
-app = FastAPI(title="SaveLivo API", version="0.1.0", docs_url="/api/docs")
+app = FastAPI(title="SaveLivo API", version="0.2.0", docs_url="/api/docs")
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["Content-Type"], allow_credentials=False)
 
 PLATFORMS = {
@@ -120,7 +125,7 @@ class AnalyzeBody(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"durum": "calisiyor", "surum": "0.1.0", "ornek_video": True}
+    return {"durum": "calisiyor", "surum": "0.2.0", "ornek_video": True}
 
 
 @app.get("/api/ornek")

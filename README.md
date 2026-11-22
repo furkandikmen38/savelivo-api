@@ -1,47 +1,44 @@
-# SaveLivo API - 0.3.0 beta
+# SaveLivo 0.3.1 – Instagram ve TikTok özel test modu
 
-## Verified features in code and local tests
+Bu paket SaveLivo 0.3'ün üzerine uygulanır. Eski çalışan MP4/PNG testleri korunur.
 
-- The existing MP4 demo and its endpoints remain available.
-- A new original PNG demo is provided at `/api/ornek-fotograf`.
-- Direct HTTPS image/video/audio URLs from an administrator-controlled host allowlist can be checked with `/api/incele`.
-- Experimental per-post platform adapters exist at `/api/hazirla`, `/api/isler/{id}`, and `/api/sonuc-dosyasi/{id}`.
-- Adapters use `gallery-dl` for some public photo posts and `yt-dlp` for some public video posts, with bounded jobs. Their success on any specific social platform has NOT been verified live.
+## Yeni özellik
 
-## Not supported or not guaranteed
+Instagram post/reel ve TikTok tekil video URL'lerini deneysel olarak hazırlama denemeleri.
+Yalnızca herkese açık, indirilmesine izin verilmiş içerikler denenir. Özel hesaplar, DRM,
+çerez/giriş, hikâyeler ve YouTube indirme desteği BU TESTTE YOKTUR.
 
-- Private stories, login-required posts, paid material, DRM-protected media, or account/profile scraping.
-- YouTube automatic downloads are NOT enabled. Platform-specific policy compliance must be evaluated first.
-- A platform logo or recognized link never implies that its content can be downloaded.
-- Production-ready rate limiting, per-user authentication, durable queues, or persistent object storage.
+Bu motorun platformlarda gerçekten indirme yapabildiği canlı olarak doğrulanmadı.
+Özellikle Instagram kimlik doğrulama gerektirebilir.
 
-## Deployment (GitHub -> Render)
+## Kurulum (önce backend)
 
-Upload these files to the **root** of the existing `savelivo-api` GitHub repository: `main.py`, `media_jobs.py`, `requirements.txt`, `render.yaml`, `ornek-fotograf.png`. Keep `ornek.mp4` in the root. Commit the change. In Render, choose **Manual Deploy -> Deploy latest commit**.
+1. ZIP içindeki `main.py`, `media_jobs.py`, `render.yaml`, `requirements.txt`,
+   `ornek.mp4`, `ornek-fotograf.png` ve `README.md` dosyalarını GitHub'daki
+   `furkandikmen38/savelivo-api` deposuna yükleyin.
+2. Render dashboard > savelivo-api > Deploys > Manual Deploy > Deploy latest commit.
+3. `/api/health` cevabında `surum: 0.3.1` görünmesini doğrulayın.
+4. Render'da Environment'a şu iki değişkeni ekleyin:
+   - `ENABLE_PUBLIC_EXTRACTORS` = `true`
+   - `SAVELIVO_TEST_KEY` = EN AZ 24 RASTGELE KARAKTERLIK KENDINIZE AIT SIR (GitHub'a yazmayın!)
+   Kaydet ve yeniden dağıt (Save and deploy). Anahtarı sohbet mesajında veya ekran görüntüsünde paylaşmayın.
+5. Netlify'da `SaveLivo-v031-Netlify-Test.zip` dosyasını mevcut sitenin Deploys alanına yükleyin.
+6. Web sitesinde `Instagram / TikTok özel test modu` bölümünü açın, Render'da seçtiğiniz
+   anahtarı yalnızca kendi tarayıcınızda girin; izin verilen kendi tekil gönderinizi deneyin.
 
-If Render uses existing service settings rather than the blueprint, its start command must stay:
+## Notlar
 
-`uvicorn main:app --host 0.0.0.0 --port $PORT`
+- `ENABLE_PUBLIC_EXTRACTORS` = false veya test anahtarı yok/24 karakterden kısa ise
+  sosyal medya motoru açılmaz. Sağlık kontrolü açık kalır.
+- Anahtar sunucuya yalnızca HTTPS `X-SaveLivo-Test-Key` başlığında iletilir; kalıcı
+  tarayıcı depolamasına yazılmaz. Dosya indirme de anahtar gerektirir.
+- Bu bir kontrollü pilot testtir; ayrı staging sunucusu ve ağ seviyesinde SSRF/egress
+  izolasyonu, kullanıcı kotası ve kalıcı depolama olmadan herkese açık hizmet yapılmamalı.
+- Render Free uykuya geçebilir, sonuç dosyası sunucu yeniden başlatılınca silinir.
+- Platformların koşullarını, hak sahipliğini ve indirme izinlerini değerlendirin.
 
-Test:
+## Kontrol adresleri
 
-- `https://savelivo-api.onrender.com/api/health` -> version `0.3.0`
-- `https://savelivo-api.onrender.com/api/ornek` -> existing MP4 demo
-- `https://savelivo-api.onrender.com/api/ornek-fotograf` -> PNG demo
-- `https://savelivo-api.onrender.com/api/medya-yetenekleri` -> feature disclosure
-
-**Important: `ENABLE_PUBLIC_EXTRACTORS` defaults to `false`.** Do not turn it on on a public website without first reviewing server egress/SSRF isolation, platform rules, bandwidth and abuse protections. The experimental adapter code is provided for a controlled development environment, not as a claim of universal downloading.
-
-## Frontend (Netlify)
-
-Upload the separate `SaveLivo-v03-Netlify.zip` in the existing Netlify project's Deploys page. It adds the PNG test button and honors the adapter's explicit enabled/disabled status.
-
-## Operational limits
-
-- Direct downloads: up to 40 MiB per file; only HTTPS, no redirects, no private IPs; permitted hosts configured by administrator.
-- Experimental platform jobs: one active task, up to 8 files, 30 MiB per item, 100 MiB per job, 75 seconds per job; jobs expire after 15 minutes.
-- Temporary files are deleted opportunistically and may disappear after a Render Free restart. Free Render is suitable for tests, not large-scale production downloads.
-
-## Privacy and rights
-
-Do not enter user passwords, cookies, or private account tokens. Only download content you own, are permitted to access and download, and whose terms allow the operation. No DRM or access-control bypass is included.
+- https://savelivo-api.onrender.com/api/health
+- https://savelivo-api.onrender.com/api/medya-yetenekleri
+- https://super-selkie-f65d2d.netlify.app/

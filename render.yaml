@@ -17,3 +17,5 @@ services:
         generateValue: true
       - key: ENABLE_PUBLIC_EXTRACTORS
         value: "false"
+      - key: SAVELIVO_TEST_KEY
+        sync: false  # Render dashboard: set a unique secret of at least 24 characters, do not commit it.

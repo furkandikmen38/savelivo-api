@@ -6,6 +6,7 @@ Designed for a small single-worker preview, not an unrestricted production servi
 from __future__ import annotations
 
 import asyncio
+import hmac
 import ipaddress
 import os
 import shutil
@@ -25,7 +26,22 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api")
-EXPERIMENTAL = os.environ.get("ENABLE_PUBLIC_EXTRACTORS", "false").lower() == "true"
+# Two independent switches: never open an unprotected downloader on the public API.
+OWNER_KEY = os.environ.get("SAVELIVO_TEST_KEY", "").strip()
+EXPERIMENTAL = (os.environ.get("ENABLE_PUBLIC_EXTRACTORS", "false").lower() == "true" and len(OWNER_KEY) >= 24)
+TEST_PROVIDERS = {"Instagram", "TikTok"}
+
+
+def owner_authenticated(request: Request) -> bool:
+    candidate = request.headers.get("X-SaveLivo-Test-Key", "")
+    return bool(EXPERIMENTAL and candidate and hmac.compare_digest(candidate, OWNER_KEY))
+
+
+def require_owner(request: Request) -> None:
+    if not EXPERIMENTAL:
+        raise HTTPException(503, "Ozel platform testi kapali. Yonetici ayarlari gerekli.")
+    if not owner_authenticated(request):
+        raise HTTPException(403, "Yonetici test anahtari hatali veya eksik.")
 MAX_TASKS = 3
 MAX_ITEMS = 8
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -93,8 +109,8 @@ def _validate_url(raw: str):
     if p.scheme != "https" or not host or port not in (None, 443) or p.username or p.password or p.fragment:
         raise HTTPException(422, "Yalnizca gecerli HTTPS baglantilari kullanilabilir.")
     provider = detect_provider(host)
-    if not provider:
-        raise HTTPException(422, "Bu platform icin indirme motoru henuz eklenmedi.")
+    if not provider or provider[0] not in TEST_PROVIDERS:
+        raise HTTPException(422, "Ozel test su anda yalnizca Instagram ve TikTok gonderileri icin acik.")
     try:
         addresses = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
         if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
@@ -106,9 +122,11 @@ def _validate_url(raw: str):
     parts = path.split("/") if path else []
     name = provider[0]
     if name == "Instagram":
-        safe = len(parts) >= 2 and parts[0] in ("p", "reel", "reels", "tv", "stories")
+        # Only individual posts/reels. Stories generally need authenticated access,
+        # which this no-login beta intentionally does not provide.
+        safe = (len(parts) == 2 and parts[0] in ("p", "reel", "reels", "tv") and len(parts[1]) >= 4)
     elif name == "TikTok":
-        safe = (len(parts) >= 3 and parts[1] == "video") or (len(parts) == 1 and host.startswith(("vm.", "vt."))) or (parts and parts[0] == "t")
+        safe = (len(parts) == 3 and parts[0].startswith("@") and parts[1] == "video" and parts[2].isdigit()) or (len(parts) == 1 and host.startswith(("vm.", "vt.")))
     elif name == "Pinterest":
         safe = (len(parts) >= 2 and parts[0] == "pin") or (host.endswith("pin.it") and len(parts) == 1)
     elif name == "Reddit":
@@ -167,10 +185,14 @@ def _run_command(job: Job, engine: str):
         ]
     try:
         # Never forward user-supplied cookies, profiles or credentials to a provider.
-        env = {k: v for k, v in os.environ.items() if k not in {"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "NETRC"}}
-        env["HOME"] = str(base)
-        env["XDG_CONFIG_HOME"] = str(base)
-        env["XDG_CACHE_HOME"] = str(base)
+        # Child processes must never inherit API credentials or Render secrets.
+        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+               "LANG": "C.UTF-8", "HOME": str(base),
+               "XDG_CONFIG_HOME": str(base), "XDG_CACHE_HOME": str(base),
+               "PYTHONIOENCODING": "utf-8"}
+        for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
+            if os.environ.get(optional):
+                env[optional] = os.environ[optional]
         subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=TASK_TIMEOUT, check=False, cwd=base, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -224,17 +246,16 @@ async def _worker(job: Job, engine: str):
 async def capabilities():
     return {"durum": "hazir", "deneysel_platformlar_aktif": EXPERIMENTAL,
             "dosya_turleri": sorted(MEDIA_SUFFIXES),
-            "platformlar": sorted(PROVIDERS), "dosya_siniri_mb": 30,
+            "platformlar": sorted(TEST_PROVIDERS), "sadece_yonetici": True, "dosya_siniri_mb": 30,
             "tek_islem_dosya_siniri": MAX_ITEMS, "not": "Listede olmasi indirilebilirlik garantisi degildir."}
 
 
 @router.post("/hazirla")
 async def begin(body: StartBody, request: Request):
     global ACTIVE
+    require_owner(request)
     if not body.izin_var:
         raise HTTPException(403, "Yalnizca kendi icerigin veya izinli icerik indirilebilir.")
-    if not EXPERIMENTAL:
-        raise HTTPException(503, "Deneysel platform indirmeleri su anda kapali.")
     _cleanup()
     url, (platform, engine) = await asyncio.to_thread(_validate_url, body.url)
     if ACTIVE >= 1 or sum(x.status in ("queued", "working") for x in JOBS.values()) >= MAX_TASKS:
@@ -253,7 +274,8 @@ async def begin(body: StartBody, request: Request):
 
 
 @router.get("/isler/{job_id}")
-async def state(job_id: str):
+async def state(job_id: str, request: Request):
+    require_owner(request)
     _cleanup()
     job = JOBS.get(job_id)
     if not job:
@@ -267,7 +289,8 @@ async def state(job_id: str):
 
 
 @router.get("/sonuc-dosyasi/{job_id}")
-async def fetch_result(job_id: str):
+async def fetch_result(job_id: str, request: Request):
+    require_owner(request)
     _cleanup()
     job = JOBS.get(job_id)
     if not job or job.status != "ready" or not job.result or not job.result.is_file():

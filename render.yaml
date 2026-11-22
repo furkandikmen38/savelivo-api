@@ -15,3 +15,5 @@ services:
         value: super-selkie-f65d2d.netlify.app
       - key: DOWNLOAD_TOKEN_SECRET
         generateValue: true
+      - key: ENABLE_PUBLIC_EXTRACTORS
+        value: "false"

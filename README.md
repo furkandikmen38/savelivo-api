@@ -1,29 +1,47 @@
-# SaveLivo - API Test 0.1
+# SaveLivo API - 0.3.0 beta
 
-This is an MVP, not a finished multi-platform downloader.
+## Verified features in code and local tests
 
-## What works
-- GET `/api/health` returns status.
-- GET `/ornek.mp4?indir=1` serves an original demo MP4 file.
-- GET `/api/ornek` returns available demo media information.
-- POST `/api/incele` recognizes major social platforms, but **does not download their videos**.
-- For direct HTTPS MP4, WebM, MP3, M4A, MOV and OGG links on **exactly allowlisted source hosts**, the API can issue a short-lived signed download link, after rights confirmation and a media HEAD request.
-- No account, login credentials, DRM bypass or private content extraction.
+- The existing MP4 demo and its endpoints remain available.
+- A new original PNG demo is provided at `/api/ornek-fotograf`.
+- Direct HTTPS image/video/audio URLs from an administrator-controlled host allowlist can be checked with `/api/incele`.
+- Experimental per-post platform adapters exist at `/api/hazirla`, `/api/isler/{id}`, and `/api/sonuc-dosyasi/{id}`.
+- Adapters use `gallery-dl` for some public photo posts and `yt-dlp` for some public video posts, with bounded jobs. Their success on any specific social platform has NOT been verified live.
 
-## Deploy to Render
+## Not supported or not guaranteed
 
-1. Create a GitHub repository such as `savelivo-api`.
-2. Upload `main.py`, `ornek.mp4`, `requirements.txt`, `render.yaml`, and this README to the root of that repository (do not upload the ZIP itself).
-3. Go to https://dashboard.render.com and create a **Web Service** connected to this GitHub repository.
-4. Choose the **Free** instance for testing, Python runtime.
-5. Build command: `pip install -r requirements.txt`
-6. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-7. Configure environment variables `CORS_ORIGINS`, `ALLOWED_MEDIA_HOSTS`, and `DOWNLOAD_TOKEN_SECRET` as shown in render.yaml. Set the secret to a securely generated value if not using a blueprint.
-8. After deployment, open `https://YOUR-RENDER-URL.onrender.com/api/health`, then `https://YOUR-RENDER-URL.onrender.com/ornek.mp4?indir=1`.
+- Private stories, login-required posts, paid material, DRM-protected media, or account/profile scraping.
+- YouTube automatic downloads are NOT enabled. Platform-specific policy compliance must be evaluated first.
+- A platform logo or recognized link never implies that its content can be downloaded.
+- Production-ready rate limiting, per-user authentication, durable queues, or persistent object storage.
 
-## Security and limitations
-- This is not ready for public high-traffic use. Add quotas/rate limits, per-user rate limiting at an edge, monitoring, egress cost limits, observability, abuse reporting, and integration tests before public promotion.
-- HTTP redirect responses are rejected. The destination host must be in `ALLOWED_MEDIA_HOSTS` and must resolve only to globally routable addresses.
-- A maximum of 40 MB is transferred through this demo proxy. Free hosting can spin down or throttle.
-- Always confirm legal permission and the platform's terms before adding extractors. Do not use account credentials or bypass paywalls, private settings, or DRM.
-- Netlify website has not been changed yet. Once Render API is online, connect the existing static site to this API and redeploy to the same Netlify project.
+## Deployment (GitHub -> Render)
+
+Upload these files to the **root** of the existing `savelivo-api` GitHub repository: `main.py`, `media_jobs.py`, `requirements.txt`, `render.yaml`, `ornek-fotograf.png`. Keep `ornek.mp4` in the root. Commit the change. In Render, choose **Manual Deploy -> Deploy latest commit**.
+
+If Render uses existing service settings rather than the blueprint, its start command must stay:
+
+`uvicorn main:app --host 0.0.0.0 --port $PORT`
+
+Test:
+
+- `https://savelivo-api.onrender.com/api/health` -> version `0.3.0`
+- `https://savelivo-api.onrender.com/api/ornek` -> existing MP4 demo
+- `https://savelivo-api.onrender.com/api/ornek-fotograf` -> PNG demo
+- `https://savelivo-api.onrender.com/api/medya-yetenekleri` -> feature disclosure
+
+**Important: `ENABLE_PUBLIC_EXTRACTORS` defaults to `false`.** Do not turn it on on a public website without first reviewing server egress/SSRF isolation, platform rules, bandwidth and abuse protections. The experimental adapter code is provided for a controlled development environment, not as a claim of universal downloading.
+
+## Frontend (Netlify)
+
+Upload the separate `SaveLivo-v03-Netlify.zip` in the existing Netlify project's Deploys page. It adds the PNG test button and honors the adapter's explicit enabled/disabled status.
+
+## Operational limits
+
+- Direct downloads: up to 40 MiB per file; only HTTPS, no redirects, no private IPs; permitted hosts configured by administrator.
+- Experimental platform jobs: one active task, up to 8 files, 30 MiB per item, 100 MiB per job, 75 seconds per job; jobs expire after 15 minutes.
+- Temporary files are deleted opportunistically and may disappear after a Render Free restart. Free Render is suitable for tests, not large-scale production downloads.
+
+## Privacy and rights
+
+Do not enter user passwords, cookies, or private account tokens. Only download content you own, are permitted to access and download, and whose terms allow the operation. No DRM or access-control bypass is included.

@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import ipaddress
+import logging
+import re
 import os
 import shutil
 import socket
@@ -26,6 +28,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api")
+LOG = logging.getLogger("uvicorn.error")
 # Two independent switches: never open an unprotected downloader on the public API.
 OWNER_KEY = os.environ.get("SAVELIVO_TEST_KEY", "").strip()
 EXPERIMENTAL = (os.environ.get("ENABLE_PUBLIC_EXTRACTORS", "false").lower() == "true" and len(OWNER_KEY) >= 24)
@@ -126,7 +129,14 @@ def _validate_url(raw: str):
         # which this no-login beta intentionally does not provide.
         safe = (len(parts) == 2 and parts[0] in ("p", "reel", "reels", "tv") and len(parts[1]) >= 4)
     elif name == "TikTok":
-        safe = (len(parts) == 3 and parts[0].startswith("@") and parts[1] == "video" and parts[2].isdigit()) or (len(parts) == 1 and host.startswith(("vm.", "vt.")))
+        # A TikTok photo carousel is not a video. Route it to the bounded
+        # gallery downloader; keep the already tested video route unchanged.
+        is_single_post = (len(parts) == 3 and parts[0].startswith("@") and
+                          parts[1] in ("video", "photo") and parts[2].isdigit())
+        is_short_video_link = (len(parts) == 1 and host.startswith(("vm.", "vt.")))
+        safe = is_single_post or is_short_video_link
+        if is_single_post and parts[1] == "photo":
+            provider = ("TikTok", "gallery")
     elif name == "Pinterest":
         safe = (len(parts) >= 2 and parts[0] == "pin") or (host.endswith("pin.it") and len(parts) == 1)
     elif name == "Reddit":
@@ -163,6 +173,18 @@ def _cleanup():
             RECENT.pop(key, None)
 
 
+def _safe_extractor_note(stderr_text: str) -> str:
+    """Keep one redacted diagnostic line without URLs or credentials."""
+    lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
+    important = ("error", "failed", "forbidden", "429", "403", "login", "sign in",
+                 "unavailable", "unsupported", "unable", "blocked", "warning")
+    selected = [line for line in lines if any(word in line.lower() for word in important)]
+    line = (selected[-1] if selected else (lines[-1] if lines else "no stderr output"))
+    line = re.sub(r"https?://[^\s<>\"']+", "[url]", line, flags=re.IGNORECASE)
+    line = re.sub(r"(?i)(authorization|cookie|token|secret|api[_-]?key|password)\s*[:=]\s*[^\s;,]+", r"\1=[redacted]", line)
+    return line[:240]
+
+
 def _run_command(job: Job, engine: str):
     base = Path(tempfile.mkdtemp(prefix="savelivo-"))
     job.directory = base
@@ -183,6 +205,9 @@ def _run_command(job: Job, engine: str):
             "--retries", "1", "--fragment-retries", "1", "--format", "b[ext=mp4]/b",
             "--output", str(target / "%(title).60s-%(id)s.%(ext)s"), job.url,
         ]
+    # Use a temporary file so verbose extractor output cannot grow in memory.
+    exit_status = -1
+    failure_note = "no stderr output"
     try:
         # Never forward user-supplied cookies, profiles or credentials to a provider.
         # Child processes must never inherit API credentials or Render secrets.
@@ -193,9 +218,15 @@ def _run_command(job: Job, engine: str):
         for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
             if os.environ.get(optional):
                 env[optional] = os.environ[optional]
-        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=TASK_TIMEOUT, check=False, cwd=base, env=env)
+        with tempfile.TemporaryFile() as diagnostic_output:
+            process = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=diagnostic_output,
+                                     timeout=TASK_TIMEOUT, check=False, cwd=base, env=env)
+            exit_status = process.returncode
+            diagnostic_output.seek(0, os.SEEK_END)
+            diagnostic_output.seek(max(0, diagnostic_output.tell() - 12000))
+            failure_note = _safe_extractor_note(diagnostic_output.read().decode("utf-8", "replace"))
     except subprocess.TimeoutExpired as exc:
+        LOG.error("SaveLivo extraction timeout platform=%s engine=%s", job.platform, engine)
         raise ValueError("Islem suresi doldu. Daha kisa veya kucuk bir gonderi dene.") from exc
     root = target.resolve()
     files = []
@@ -215,7 +246,12 @@ def _run_command(job: Job, engine: str):
         if len(files) >= MAX_ITEMS:
             break
     if not files:
+        LOG.error("SaveLivo extraction empty platform=%s engine=%s exit=%s detail=%s",
+                  job.platform, engine, exit_status, failure_note)
         raise ValueError("Erisilebilir medya bulunamadi. Platform giris veya izin gerektiriyor olabilir.")
+    if exit_status:
+        LOG.warning("SaveLivo extraction partial platform=%s engine=%s exit=%s detail=%s",
+                    job.platform, engine, exit_status, failure_note)
     job.count = len(files)
     if len(files) == 1:
         job.result = files[0]
@@ -238,6 +274,8 @@ async def _worker(job: Job, engine: str):
     except Exception as exc:
         job.status = "failed"
         job.description = str(exc) if isinstance(exc, ValueError) else "Kaynak islenemedi. Baglanti veya platform kisiti olabilir."
+        if not isinstance(exc, ValueError):
+            LOG.error("SaveLivo worker failed platform=%s type=%s", job.platform, type(exc).__name__)
     finally:
         ACTIVE = max(0, ACTIVE - 1)
 

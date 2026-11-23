@@ -129,7 +129,14 @@ def _validate_url(raw: str):
         # which this no-login beta intentionally does not provide.
         safe = (len(parts) == 2 and parts[0] in ("p", "reel", "reels", "tv") and len(parts[1]) >= 4)
     elif name == "TikTok":
-        safe = (len(parts) == 3 and parts[0].startswith("@") and parts[1] == "video" and parts[2].isdigit()) or (len(parts) == 1 and host.startswith(("vm.", "vt.")))
+        # A TikTok photo carousel is not a video. Route it to the bounded
+        # gallery downloader; keep the already tested video route unchanged.
+        is_single_post = (len(parts) == 3 and parts[0].startswith("@") and
+                          parts[1] in ("video", "photo") and parts[2].isdigit())
+        is_short_video_link = (len(parts) == 1 and host.startswith(("vm.", "vt.")))
+        safe = is_single_post or is_short_video_link
+        if is_single_post and parts[1] == "photo":
+            provider = ("TikTok", "gallery")
     elif name == "Pinterest":
         safe = (len(parts) >= 2 and parts[0] == "pin") or (host.endswith("pin.it") and len(parts) == 1)
     elif name == "Reddit":

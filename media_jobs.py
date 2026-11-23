@@ -185,6 +185,12 @@ def _safe_extractor_note(stderr_text: str) -> str:
     return line[:240]
 
 
+def _short_media_name(path: Path, limit: int) -> str:
+    """Trim a long media filename while preserving its extension."""
+    suffix = path.suffix
+    return path.stem[:max(1, limit - len(suffix))] + suffix
+
+
 def _run_command(job: Job, engine: str):
     base = Path(tempfile.mkdtemp(prefix="savelivo-"))
     job.directory = base
@@ -259,7 +265,8 @@ def _run_command(job: Job, engine: str):
         bundle = base / "savelivo-medya.zip"
         with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as output:
             for i, p in enumerate(files, 1):
-                name = f"{i:02d}-{p.name[:90]}"
+                # Long post captions must not truncate the file extension.
+                name = f"{i:02d}-{_short_media_name(p, 90)}"
                 output.write(p, arcname=name)
         job.result = bundle
 
@@ -335,6 +342,6 @@ async def fetch_result(job_id: str, request: Request):
         raise HTTPException(404, "Dosya bulunamadi veya suresi doldu.")
     suffix = job.result.suffix.lower()
     kind = "application/zip" if suffix == ".zip" else "application/octet-stream"
-    filename = "savelivo-medya.zip" if suffix == ".zip" else "savelivo-" + job.result.name[:80]
+    filename = "savelivo-medya.zip" if suffix == ".zip" else "savelivo-" + _short_media_name(job.result, 80)
     return FileResponse(job.result, media_type=kind, filename=filename,
                         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

@@ -51,6 +51,9 @@ MAX_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_SINGLE_BYTES = 30 * 1024 * 1024
 TASK_TTL = 15 * 60
 TASK_TIMEOUT = 75
+# Respect Instagram rate limits; do not retry while the provider is rejecting requests.
+INSTAGRAM_COOLDOWN_SECONDS = 15 * 60
+INSTAGRAM_BLOCKED_UNTIL = 0.0
 MEDIA_SUFFIXES = {".mp4", ".m4v", ".webm", ".mov", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".mp3", ".m4a", ".wav", ".ogg", ".flac"}
 
 # A provider appearing here is eligible for an *attempt*, not guaranteed support.
@@ -185,6 +188,11 @@ def _safe_extractor_note(stderr_text: str) -> str:
     return line[:240]
 
 
+def _instagram_cooldown_remaining() -> int:
+    """Remaining pause after Instagram returned 429, in this process only."""
+    return max(0, int(INSTAGRAM_BLOCKED_UNTIL - time.monotonic() + 0.999))
+
+
 def _short_media_name(path: Path, limit: int) -> str:
     """Trim a long media filename while preserving its extension."""
     suffix = path.suffix
@@ -192,6 +200,7 @@ def _short_media_name(path: Path, limit: int) -> str:
 
 
 def _run_command(job: Job, engine: str):
+    global INSTAGRAM_BLOCKED_UNTIL
     base = Path(tempfile.mkdtemp(prefix="savelivo-"))
     job.directory = base
     target = base / "indirilenler"
@@ -199,7 +208,8 @@ def _run_command(job: Job, engine: str):
     if engine == "gallery":
         args = [
             sys.executable, "-m", "gallery_dl", "--config-ignore", "--no-part", "--no-mtime",
-            "--no-postprocessors", "--http-timeout", "12", "--retries", "1",
+            "--no-postprocessors", "--http-timeout", "12", "--retries",
+            "0" if job.platform == "Instagram" else "1",
             "--range", "1-8", "--filesize-max", "30M", "--destination", str(target),
             job.url,
         ]
@@ -214,6 +224,7 @@ def _run_command(job: Job, engine: str):
     # Use a temporary file so verbose extractor output cannot grow in memory.
     exit_status = -1
     failure_note = "no stderr output"
+    rate_limited = False
     try:
         # Never forward user-supplied cookies, profiles or credentials to a provider.
         # Child processes must never inherit API credentials or Render secrets.
@@ -230,10 +241,16 @@ def _run_command(job: Job, engine: str):
             exit_status = process.returncode
             diagnostic_output.seek(0, os.SEEK_END)
             diagnostic_output.seek(max(0, diagnostic_output.tell() - 12000))
-            failure_note = _safe_extractor_note(diagnostic_output.read().decode("utf-8", "replace"))
+            diagnostic_tail = diagnostic_output.read().decode("utf-8", "replace")
+            failure_note = _safe_extractor_note(diagnostic_tail)
+            rate_limited = (job.platform == "Instagram" and
+                            bool(re.search(r"\b429\b|too many requests", diagnostic_tail, re.IGNORECASE)))
     except subprocess.TimeoutExpired as exc:
         LOG.error("SaveLivo extraction timeout platform=%s engine=%s", job.platform, engine)
         raise ValueError("Islem suresi doldu. Daha kisa veya kucuk bir gonderi dene.") from exc
+    if rate_limited:
+        INSTAGRAM_BLOCKED_UNTIL = max(INSTAGRAM_BLOCKED_UNTIL, time.monotonic() + INSTAGRAM_COOLDOWN_SECONDS)
+        LOG.warning("SaveLivo Instagram rate limited (429); cooldown_seconds=%d", INSTAGRAM_COOLDOWN_SECONDS)
     root = target.resolve()
     files = []
     total = 0
@@ -254,6 +271,8 @@ def _run_command(job: Job, engine: str):
     if not files:
         LOG.error("SaveLivo extraction empty platform=%s engine=%s exit=%s detail=%s",
                   job.platform, engine, exit_status, failure_note)
+        if rate_limited:
+            raise ValueError("Instagram istegi 429 (cok fazla istek) nedeniyle reddetti. En az 15 dakika bekleyin. Erisimin acilmasi garanti degil.")
         raise ValueError("Erisilebilir medya bulunamadi. Platform giris veya izin gerektiriyor olabilir.")
     if exit_status:
         LOG.warning("SaveLivo extraction partial platform=%s engine=%s exit=%s detail=%s",
@@ -303,6 +322,15 @@ async def begin(body: StartBody, request: Request):
         raise HTTPException(403, "Yalnizca kendi icerigin veya izinli icerik indirilebilir.")
     _cleanup()
     url, (platform, engine) = await asyncio.to_thread(_validate_url, body.url)
+    if platform == "Instagram":
+        remaining = _instagram_cooldown_remaining()
+        if remaining:
+            minutes = max(1, (remaining + 59) // 60)
+            raise HTTPException(
+                429,
+                f"Instagram gecici olarak istekleri sinirliyor (429). En az {minutes} dakika sonra tekrar deneyin; erisim garanti degildir.",
+                headers={"Retry-After": str(remaining)},
+            )
     if ACTIVE >= 1 or sum(x.status in ("queued", "working") for x in JOBS.values()) >= MAX_TASKS:
         raise HTTPException(429, "Sunucu mesgul. Biraz sonra yeniden dene.")
     client = request.client.host if request.client else "unknown"

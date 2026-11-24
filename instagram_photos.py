@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+import requests
 from instaloader import InstaloaderContext, Post
 
 MAX_ITEMS = 8
@@ -21,11 +22,77 @@ class DownloadError(ValueError):
     """Safe diagnostic text that can be printed without upstream response bodies."""
 
 
+def _http_error(status: int, stage: str, location: str = "") -> DownloadError:
+    if status == 429:
+        return DownloadError(f"HTTP 429: Instagram istegi sinirladi. stage={stage}")
+    if 300 <= status < 400:
+        try:
+            login_redirect = "/accounts/login" in urlsplit(location).path.lower()
+        except ValueError:
+            login_redirect = False
+        code = "LOGIN_REQUIRED" if login_redirect else "HTTP_REDIRECT"
+    elif status == 401:
+        code = "LOGIN_REQUIRED"
+    elif status == 403:
+        code = "ACCESS_DENIED"
+    elif status == 404:
+        code = "NOT_FOUND"
+    elif 500 <= status < 600:
+        code = "UPSTREAM_ERROR"
+    else:
+        code = "HTTP_ERROR"
+    return DownloadError(f"{code}: HTTP {status} stage={stage}")
+
+
+def _exception_error(exc: Exception, stage: str) -> DownloadError:
+    """Report safe exception categories, never raw messages, URLs or headers."""
+    chain = []
+    current = exc
+    while current is not None and len(chain) < 8 and all(current is not e for e in chain):
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    kind = re.sub(r"[^A-Za-z0-9_]", "_", type(exc).__name__)[:64]
+    for item in chain:
+        if isinstance(item, DownloadError):
+            return item
+        response = getattr(item, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and 300 <= status <= 599:
+            return _http_error(status, stage, response.headers.get("Location", ""))
+        # Some upstream exceptions wrap HTTP status in text, not response objects.
+        note = str(item)
+        if re.search(r"\b429\b|too many requests", note, re.IGNORECASE):
+            return _http_error(429, stage)
+        match = re.search(r"\b(?:HTTP\s+|status(?:\s+code)?[\s:=]+)([345]\d\d)\b|\b(401|403|404|500|502|503|504)\s+(?:Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b", note, re.IGNORECASE)
+        if match:
+            return _http_error(int(match.group(1) or match.group(2)), stage)
+        name = type(item).__name__
+        if name == "TooManyRequestsException":
+            return _http_error(429, stage)
+        if name in ("LoginRequiredException", "PrivateProfileNotFollowedException") or re.search(r"redirect(?:ed)? to (?:the )?login page|login required|login is required", note, re.IGNORECASE):
+            return DownloadError(f"LOGIN_REQUIRED: stage={stage} type={kind}")
+        if name == "QueryReturnedForbiddenException":
+            return _http_error(403, stage)
+        if name in ("QueryReturnedNotFoundException", "PostNotExistsException"):
+            return _http_error(404, stage)
+    if any(isinstance(e, (requests.exceptions.Timeout, httpx.TimeoutException, TimeoutError)) for e in chain):
+        code = "NETWORK_TIMEOUT"
+    elif any(isinstance(e, (requests.exceptions.SSLError,)) for e in chain):
+        code = "TLS_ERROR"
+    elif any(type(e).__name__ in ("JSONDecodeError", "BadResponseException") for e in chain):
+        code = "RESPONSE_FORMAT_ERROR"
+    elif any(isinstance(e, (requests.exceptions.ConnectionError, httpx.NetworkError, ConnectionError, OSError)) for e in chain):
+        code = "NETWORK_ERROR"
+    elif any(isinstance(e, (AttributeError, TypeError, NameError, KeyError, IndexError, ImportError)) for e in chain):
+        code = "CODE_OR_SCHEMA_ERROR"
+    else:
+        code = "UNCLASSIFIED_ERROR"
+    return DownloadError(f"{code}: stage={stage} type={kind}")
+
+
 def _check_response(response, **_kwargs):
-    if response.status_code == 429:
-        raise DownloadError("HTTP 429: Instagram istegi sinirladi.")
     if response.status_code != 200:
-        raise DownloadError("LOGIN_REQUIRED: Instagram anonim erisime izin vermedi.")
+        raise _http_error(response.status_code, "metadata", response.headers.get("Location", ""))
     return response
 
 
@@ -86,11 +153,7 @@ def _metadata(shortcode: str) -> tuple[list[tuple[bool, str]], str]:
     except DownloadError:
         raise
     except Exception as exc:
-        # AbortDownloadException is not an InstaloaderException. Never print its
-        # body, URL, cookies, or library advice to load an authenticated session.
-        if re.search(r"\b429\b|too many requests", str(exc), re.IGNORECASE):
-            raise DownloadError("HTTP 429: Instagram istegi sinirladi.") from None
-        raise DownloadError("EMPTY_MEDIA: Instagram gonderisine anonim erisilemiyor.") from None
+        raise _exception_error(exc, "metadata") from None
     finally:
         context.close()
 
@@ -144,10 +207,8 @@ def download_post(url: str, target: Path) -> int:
             for index, (video, media_url) in enumerate(entries, 1):
                 _validate_cdn(media_url)
                 with client.stream("GET", media_url) as response:
-                    if response.status_code == 429:
-                        raise DownloadError("HTTP 429: Instagram medya istegini sinirladi.")
                     if response.status_code != 200:
-                        raise DownloadError("EMPTY_MEDIA: Medya dosyasina erisilemiyor.")
+                        raise _http_error(response.status_code, "cdn", response.headers.get("Location", ""))
                     length = int(response.headers.get("content-length", "0"))
                     if length > MAX_SINGLE_BYTES or total + length > MAX_TOTAL_BYTES:
                         raise DownloadError("MEDIA_TOO_LARGE: Dosya boyutu siniri asildi.")
@@ -190,9 +251,9 @@ def main(argv: list[str] | None = None) -> int:
         download_post(argv[0], Path(argv[1]))
         return 0
     except DownloadError as exc:
-        print(str(exc), file=sys.stderr)
-    except Exception:
-        print("EMPTY_MEDIA: Medya hazirlanamadi veya baglanti kesildi.", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"ERROR: {_exception_error(exc, 'worker')}", file=sys.stderr)
     return 1
 
 

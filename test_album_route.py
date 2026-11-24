@@ -51,7 +51,7 @@ class Routing(TestCase):
         self.assertEqual(self.candidate('<meta name="medium" content="video">'), (None, []))
 
     def test_single_photo_unchanged(self):
-        self.assertEqual(self.candidate('<meta name="medium" content="image"><meta name="twitter:title" content="Instagram photo">'), ([COVER], True), [])
+        self.assertEqual(self.candidate('<meta name="medium" content="image"><meta name="twitter:title" content="Instagram photo">'), (([COVER], True), []))
 
     def test_wrong_post_rejected(self):
         with self.assertRaises(m.DownloadError):

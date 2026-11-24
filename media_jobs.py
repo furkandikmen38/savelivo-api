@@ -246,6 +246,9 @@ def _run_command(job: Job, engine: str):
            "LANG": "C.UTF-8", "HOME": str(base),
            "XDG_CONFIG_HOME": str(base), "XDG_CACHE_HOME": str(base),
            "PYTHONIOENCODING": "utf-8"}
+    if engine == "instagram_photos" and os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").lower() == "true":
+        env["ENABLE_INSTAGRAM_ALBUM_BROWSER"] = "true"
+        env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
         if os.environ.get(optional):
             env[optional] = os.environ[optional]
@@ -281,6 +284,8 @@ def _run_command(job: Job, engine: str):
                   job.platform, engine, exit_status, failure_note)
         photo_errors = {
             "LOGIN_REQUIRED": "Instagram bu gönderiye hesap girişi olmadan erişim sağlamadı.",
+            "ALBUM_UNAVAILABLE": "Instagram albümünün tamamı doğrulanamadı. Eksik ZIP hazırlanmadı.",
+            "ACCESS_DENIED": "Instagram bu gönderiye veya medyaya erişim sağlamadı.",
             "PUBLIC_PAGE_UNAVAILABLE": "Instagram gonderisinin herkese acik sayfa bilgileri dogrulanamadi.",
             "MEDIA_TOO_LARGE": "Dosya boyutu sınırı aşıldı: dosya başına 30 MB, toplam 100 MB.",
             "UNSUPPORTED_MEDIA": "Instagram geçerli ve desteklenen bir medya dosyası döndürmedi.",

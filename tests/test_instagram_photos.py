@@ -115,7 +115,7 @@ class MetadataTests(unittest.TestCase):
                 with patch.object(adapter._PublicContext, "_web_api_tokens", tokens), \
                      patch.object(context_module, "copy_session", side_effect=copy_session), \
                      patch.object(adapter._PublicContext, "do_sleep"):
-                    with self.assertRaisesRegex(adapter.DownloadError, "429" if status == 429 else "EMPTY_MEDIA"):
+                    with self.assertRaisesRegex(adapter.DownloadError, "HTTP 429" if status == 429 else "HTTP_REDIRECT"):
                         adapter._metadata("AbCdEf12345")
                 self.assertEqual(len(sessions), 1)
                 self.assertEqual(sessions[0].post.call_count, 1)
@@ -156,6 +156,7 @@ class DownloadTests(unittest.TestCase):
             return real_client(transport=httpx.MockTransport(transport), **kwargs)
 
         with patch.object(adapter, "_metadata", return_value=(entries, "SaveLivo-test")), \
+             patch.object(adapter, "_public_page_photo", return_value=None), \
              patch.object(adapter.httpx, "Client", side_effect=make_client):
             yield seen
 
@@ -242,7 +243,7 @@ class DownloadTests(unittest.TestCase):
         self.assert_empty()
 
     def test_cli_never_prints_raw_error_or_credentials(self):
-        with patch.object(adapter, "download_post", side_effect=ValueError("token=SECRET")):
+        with patch.object(adapter, "download_post", side_effect=adapter.DownloadError("EMPTY_MEDIA: token=SECRET")):
             output = io.StringIO()
             with contextlib.redirect_stderr(output):
                 self.assertEqual(adapter.main([URL, str(self.target)]), 1)

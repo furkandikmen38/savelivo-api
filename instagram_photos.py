@@ -6,6 +6,7 @@ import ipaddress
 import re
 import socket
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 import requests
 from instaloader import InstaloaderContext, Post
+from instagram_public_media import _public_page_candidates
 
 MAX_ITEMS = 8
 MAX_SINGLE_BYTES = 30 * 1024 * 1024
@@ -147,6 +149,7 @@ def _media(post: Post) -> list[tuple[bool, str]]:
 
 PUBLIC_PAGE_AGENT = "SaveLivo/0.3"
 MAX_PUBLIC_HEAD = 2 * 1024 * 1024
+MAX_PUBLIC_PAGE = 8 * 1024 * 1024
 
 
 class _PublicPhotoHead(HTMLParser):
@@ -207,11 +210,14 @@ class _PublicPhotoHead(HTMLParser):
         return image
 
 
-def _public_page_photo(shortcode: str) -> str | None:
+def _public_page_photo(shortcode: str) -> tuple[list[str], bool] | None:
     """One ordinary public page request; stop on denial or rate limiting."""
     parser = _PublicPhotoHead()
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     received = 0
+    fragments = []
+    preview = None
+    deadline = time.monotonic() + 8
     try:
         with httpx.Client(timeout=12, follow_redirects=False, trust_env=False,
                           headers={"User-Agent": PUBLIC_PAGE_AGENT, "Accept": "text/html",
@@ -221,17 +227,38 @@ def _public_page_photo(shortcode: str) -> str | None:
                     raise _http_error(response.status_code, "public_page", response.headers.get("Location", ""))
                 if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/html":
                     raise DownloadError("RESPONSE_FORMAT_ERROR: stage=public_page")
-                for chunk in response.iter_bytes(chunk_size=16384):
-                    received += len(chunk)
-                    if received > MAX_PUBLIC_HEAD:
-                        raise DownloadError("PUBLIC_PAGE_UNAVAILABLE: Sayfa basligi boyut sinirini asti.")
-                    parser.feed(decoder.decode(chunk))
-                    if parser.done:
-                        break
-                if not parser.done:
-                    parser.feed(decoder.decode(b"", final=True))
-                    parser.close()
-                return parser.photo(shortcode)
+                try:
+                    for chunk in response.iter_bytes(chunk_size=16384):
+                        received += len(chunk)
+                        if received > MAX_PUBLIC_PAGE or (parser.done and time.monotonic() > deadline):
+                            break
+                        part = decoder.decode(chunk)
+                        fragments.append(part)
+                        if not parser.done:
+                            if received > MAX_PUBLIC_HEAD:
+                                raise DownloadError("PUBLIC_PAGE_UNAVAILABLE: Sayfa basligi boyut sinirini asti.")
+                            parser.feed(part)
+                            if parser.done:
+                                preview = parser.photo(shortcode)
+                    if not parser.done:
+                        parser.feed(decoder.decode(b"", final=True))
+                        parser.close()
+                        preview = parser.photo(shortcode)
+                except httpx.ReadTimeout:
+                    if not parser.done or not preview:
+                        raise
+                cover = parser._one("og:image")
+                try:
+                    choices = _public_page_candidates("".join(fragments), shortcode, cover, preview is not None, MAX_ITEMS)
+                except (ValueError, TypeError, RecursionError, AssertionError):
+                    choices = None
+                if choices:
+                    for url in choices:
+                        _validate_cdn(url)
+                    return choices, bool(preview and choices == [preview])
+                if preview:
+                    return [preview], True
+                return None
     except DownloadError:
         raise
     except Exception as exc:
@@ -293,8 +320,9 @@ def download_post(url: str, target: Path) -> int:
     shortcode = _shortcode(url)
     public_photo = _public_page_photo(shortcode)
     if public_photo is not None:
-        entries, user_agent = [(False, public_photo)], PUBLIC_PAGE_AGENT
-        prefix = "instagram-onizleme"
+        public_urls, preview_only = public_photo
+        entries, user_agent = [(False, url) for url in public_urls], PUBLIC_PAGE_AGENT
+        prefix = "instagram-onizleme" if preview_only else "instagram-fotograf"
     else:
         # A public page may identify a carousel, but never serve its cover alone.
         entries, user_agent = _metadata(shortcode)

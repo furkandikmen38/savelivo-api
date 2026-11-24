@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 import time
 import unittest
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -77,7 +76,7 @@ class CommandTests(unittest.TestCase):
         self.assertIsNone(self.job.result)
         self.assertFalse((self.base / "indirilenler").exists())
 
-    def test_photo_archive_preserves_carousel_order(self):
+    def test_photo_carousel_returns_only_one_image_without_zip(self):
         def run(args, **kwargs):
             for index in (3, 1, 2):
                 (Path(args[-1]) / f"instagram-{index:02d}.jpg").write_bytes(b"\xff\xd8\xfftest")
@@ -85,9 +84,26 @@ class CommandTests(unittest.TestCase):
 
         with patch.object(jobs.subprocess, "run", side_effect=run):
             jobs._run_command(self.job, "instagram_photos")
-        with zipfile.ZipFile(self.job.result) as archive:
-            self.assertEqual(archive.namelist(), [
-                "01-instagram-01.jpg", "02-instagram-02.jpg", "03-instagram-03.jpg"])
+        self.assertEqual(self.job.count, 1)
+        self.assertEqual(self.job.result.name, "instagram-01.jpg")
+        self.assertEqual(self.job.result.suffix, ".jpg")
+        self.assertNotEqual(self.job.result.suffix, ".zip")
+
+    def test_gallery_command_requests_only_the_first_item(self):
+        seen = {}
+        def run(args, **kwargs):
+            seen["args"] = args
+            (Path(args[-1]) / "first.jpg").write_bytes(b"\xff\xd8\xfffirst")
+            (Path(args[-1]) / "second.jpg").write_bytes(b"\xff\xd8\xffsecond")
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(jobs.subprocess, "run", side_effect=run):
+            jobs._run_command(self.job, "gallery")
+        range_index = seen["args"].index("--range")
+        self.assertEqual(seen["args"][range_index + 1], "1-1")
+        self.assertEqual(self.job.count, 1)
+        self.assertEqual(self.job.result.name, "first.jpg")
+        self.assertNotEqual(self.job.result.suffix, ".zip")
 
     def test_oversized_photo_has_an_actionable_message(self):
         def run(args, **kwargs):

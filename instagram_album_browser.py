@@ -51,7 +51,20 @@ SELECT = r'''button => {
   const images=[...list.querySelectorAll('div._aagv img')].filter(x=>x.complete&&x.naturalWidth)
     .map(x=>({url:x.currentSrc||x.src,area:visible(x)})).filter(x=>x.area>10000).sort((a,b)=>b.area-a.area);
   if(!images.length||(images[1]&&images[1].area>0.5*images[0].area))return null;
-  return images[0].url;
+  // Require a visible pagination indicator in the same carousel, not a guessed count.
+  let dots=null;
+  for(let i=0, p=root;p&&i<5;i++,p=p.parentElement){
+    const groups=[...p.querySelectorAll('div._acvz')].filter(g=>{
+      const children=[...g.children];
+      return children.length>=2&&children.length<=30&&children.every(d=>{
+        const r=rect(d); return r.width>0&&r.height>0&&r.width<=18&&r.height<=18;
+      });
+    });
+    if(groups.length>1)return null;
+    if(groups.length===1){dots=groups[0];break;}
+  }
+  if(!dots)return null;
+  return {url:images[0].url,count:dots.children.length};
 }'''
 
 
@@ -68,6 +81,7 @@ def collect_album(page, shortcode, cover, max_items=8, seconds=35, denied=lambda
     result = []
     keys = set()
     old = None
+    expected = None
     for index in range(max_items):
         stable = None
         since = 0
@@ -84,10 +98,14 @@ def collect_album(page, shortcode, cover, max_items=8, seconds=35, denied=lambda
             if len(nxt) > 1 or len(prev) > 1:
                 raise AlbumError('ALBUM_UNAVAILABLE: Ambiguous carousel.')
             anchor = (nxt or prev)
-            url = anchor[0].evaluate(SELECT, timeout=1000) if anchor else None
+            item = anchor[0].evaluate(SELECT, timeout=1000) if anchor else None
+            url = item.get('url') if item else None
+            count = item.get('count') if item else None
             key = asset_key(url) if url else None
-            valid = bool(key and key != old and ((index == 0 and nxt and not prev) or (index > 0 and prev)))
-            state = (key, bool(nxt), bool(prev)) if valid else None
+            if isinstance(count, int) and count > max_items:
+                raise AlbumError('ALBUM_UNAVAILABLE: Album exceeds supported limit.')
+            valid = bool(key and key != old and isinstance(count, int) and 2 <= count <= max_items and (expected is None or expected == count) and bool(nxt) == (index + 1 < count) and bool(prev) == (index > 0))
+            state = (key, count, bool(nxt), bool(prev)) if valid else None
             now = time.monotonic()
             if state and state == stable and now - since >= 0.8:
                 break
@@ -98,13 +116,14 @@ def collect_album(page, shortcode, cover, max_items=8, seconds=35, denied=lambda
             raise AlbumError('ALBUM_UNAVAILABLE: Visible photo or navigation timed out.')
         if key in keys or (index == 0 and key != asset_key(cover)):
             raise AlbumError('ALBUM_UNAVAILABLE: Album identity or order mismatch.')
+        expected = count
         result.append(url)
         keys.add(key)
         old = key
         if denied():
             raise AlbumError('ACCESS_DENIED: Browser request denied or rate limited.')
         if not nxt:
-            if len(result) < 2 or not prev:
+            if len(result) != expected or not prev:
                 raise AlbumError('ALBUM_UNAVAILABLE: Album endpoint not confirmed.')
             return result
         if index == max_items - 1:
@@ -141,14 +160,14 @@ def read_public_album(shortcode, cover, max_items=8):
             try:
                 context = browser.new_context(locale='en-US', viewport={'width':1280,'height':1000},
                                               accept_downloads=False, service_workers='block')
-                context.route('**/*', lambda route: route.continue_() if _allowed_request(route.request.url) else route.abort())
+                context.route('**/*', lambda route: route.continue_() if not blocked[0] and _allowed_request(route.request.url) else route.abort())
                 page = context.new_page()
                 page.set_default_timeout(2000)
                 def response(r):
                     if _allowed_request(r.url):
                         if r.status == 429:
                             blocked[0] = 429
-                        elif r.status in (401, 403) and (r.request.is_navigation_request() or r.request.resource_type == 'image'):
+                        elif r.status in (401, 403):
                             if blocked[0] != 429:
                                 blocked[0] = r.status
                 page.on('response', response)

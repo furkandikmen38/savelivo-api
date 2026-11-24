@@ -246,9 +246,12 @@ def _run_command(job: Job, engine: str):
            "LANG": "C.UTF-8", "HOME": str(base),
            "XDG_CONFIG_HOME": str(base), "XDG_CACHE_HOME": str(base),
            "PYTHONIOENCODING": "utf-8"}
-    if engine == "instagram_photos" and os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").lower() == "true":
-        env["ENABLE_INSTAGRAM_ALBUM_BROWSER"] = "true"
-        env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    if engine == "instagram_photos":
+        browser_enabled = os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").strip().lower() == "true"
+        LOG.info("SaveLivo Instagram album_browser_enabled=%s", browser_enabled)
+        if browser_enabled:
+            env["ENABLE_INSTAGRAM_ALBUM_BROWSER"] = "true"
+            env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
         if os.environ.get(optional):
             env[optional] = os.environ[optional]

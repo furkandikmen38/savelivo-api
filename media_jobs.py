@@ -390,7 +390,9 @@ async def state(job_id: str, request: Request):
         raise HTTPException(404, "Islem bulunamadi veya suresi doldu.")
     result = {"durum": job.status, "platform": job.platform, "aciklama": job.description}
     if job.status == "ready" and job.result and job.result.exists():
-        result["secenekler"] = [{"format": "ZIP" if job.result.suffix == ".zip" else job.result.suffix[1:].upper(),
+        if job.result.suffix.lower() == ".zip":
+            raise HTTPException(409, "Toplu ZIP indirmesi kapalı. Tek medya dosyası indirilebilir.")
+        result["secenekler"] = [{"format": job.result.suffix[1:].upper(),
                                  "boyut_bayt": job.result.stat().st_size,
                                  "indir_url": f"/api/sonuc-dosyasi/{job.id}"}]
     return result
@@ -404,8 +406,9 @@ async def fetch_result(job_id: str, request: Request):
     if not job or job.status != "ready" or not job.result or not job.result.is_file():
         raise HTTPException(404, "Dosya bulunamadi veya suresi doldu.")
     suffix = job.result.suffix.lower()
-    kind = "application/zip" if suffix == ".zip" else "application/octet-stream"
-    filename = "savelivo-medya.zip" if suffix == ".zip" else "savelivo-" + _short_media_name(job.result, 80)
-    return FileResponse(job.result, media_type=kind, filename=filename,
+    if suffix == ".zip":
+        raise HTTPException(409, "Toplu ZIP indirmesi kapalı. Tek medya dosyası indirilebilir.")
+    filename = "savelivo-" + _short_media_name(job.result, 80)
+    return FileResponse(job.result, media_type="application/octet-stream", filename=filename,
                         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 

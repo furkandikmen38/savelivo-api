@@ -42,17 +42,15 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(query.call_count, 1)
         self.assertTrue(query.call_args.kwargs["web_api"])
 
-    def test_real_library_preserves_mixed_carousel_order_and_caps_eight(self):
+    def test_real_library_returns_only_first_carousel_item(self):
         nodes = [image_node(i) for i in range(1, 10)]
         nodes[1] = {"media_type": 2, "video_versions": [{"url": CDN + "2.mp4"}],
                     "image_versions2": {"candidates": [{"url": CDN + "thumbnail.jpg"}]}}
         with patch.object(adapter._PublicContext, "doc_id_graphql_query",
                           return_value=metadata_response(8, nodes)) as query:
             media, _ = adapter._metadata("AbCdEf12345")
-        self.assertEqual(len(media), 8)
-        self.assertEqual(media[:3], [(False, CDN + "1.jpg"), (True, CDN + "2.mp4"),
-                                    (False, CDN + "3.jpg")])
-        self.assertEqual(media[-1], (False, CDN + "8.jpg"))
+        self.assertEqual(adapter.MAX_ITEMS, 1)
+        self.assertEqual(media, [(False, CDN + "1.jpg")])
         self.assertEqual(query.call_count, 1)
 
     def test_no_additional_homepage_request_when_csrf_missing(self):
@@ -164,17 +162,16 @@ class DownloadTests(unittest.TestCase):
     def assert_empty(self):
         self.assertEqual(list(self.target.iterdir()), [])
 
-    def test_mixed_media_uses_true_types_and_complete_ordered_names(self):
+    def test_multi_media_post_downloads_only_first_file(self):
         entries = [(False, CDN + "1.jpg"), (True, CDN + "2.mp4")]
         def response(request):
             return httpx.Response(200, content=MP4 if request.url.path.endswith("mp4") else JPEG,
                                   headers={"content-type": "video/mp4" if request.url.path.endswith("mp4") else "image/jpeg"})
         with self.setup_download(entries, response) as seen:
-            self.assertEqual(adapter.download_post(URL, self.target), 2)
-        self.assertEqual(len(seen), 2)
+            self.assertEqual(adapter.download_post(URL, self.target), 1)
+        self.assertEqual(len(seen), 1)
         self.assertEqual((self.target / "instagram-01.jpg").read_bytes(), JPEG)
-        self.assertEqual((self.target / "instagram-02.mp4").read_bytes(), MP4)
-        self.assertEqual(len(list(self.target.iterdir())), 2)
+        self.assertEqual([p.name for p in self.target.iterdir()], ["instagram-01.jpg"])
 
     def test_429_stops_before_next_media_and_discards_prior_files(self):
         entries = [(False, CDN + f"{i}.jpg") for i in range(1, 4)]
@@ -182,7 +179,7 @@ class DownloadTests(unittest.TestCase):
             if request.url.path == "/2.jpg":
                 return httpx.Response(429, text="private error body")
             return httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
-        with self.setup_download(entries, response) as seen:
+        with patch.object(adapter, "MAX_ITEMS", 3), self.setup_download(entries, response) as seen:
             with self.assertRaisesRegex(adapter.DownloadError, "HTTP 429"):
                 adapter.download_post(URL, self.target)
         self.assertEqual(len(seen), 2)
@@ -227,7 +224,7 @@ class DownloadTests(unittest.TestCase):
 
     def test_total_size_limit_discards_previous_media(self):
         entries = [(False, CDN + f"{i}.jpg") for i in (1, 2)]
-        with patch.object(adapter, "MAX_TOTAL_BYTES", len(JPEG) + 1), self.setup_download(
+        with patch.object(adapter, "MAX_TOTAL_BYTES", len(JPEG) + 1), patch.object(adapter, "MAX_ITEMS", 2), self.setup_download(
                 entries, lambda _: httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})):
             with self.assertRaisesRegex(adapter.DownloadError, "MEDIA_TOO_LARGE"):
                 adapter.download_post(URL, self.target)
@@ -238,7 +235,8 @@ class DownloadTests(unittest.TestCase):
             if request.url.path == "/2.jpg":
                 raise httpx.ReadTimeout("upstream disconnected", request=request)
             return httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
-        with self.setup_download([(False, CDN + "1.jpg"), (False, CDN + "2.jpg")], response):
+        with patch.object(adapter, "MAX_ITEMS", 2), self.setup_download(
+                [(False, CDN + "1.jpg"), (False, CDN + "2.jpg")], response):
             with self.assertRaises(httpx.ReadTimeout):
                 adapter.download_post(URL, self.target)
         self.assert_empty()

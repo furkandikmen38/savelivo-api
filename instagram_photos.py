@@ -67,7 +67,7 @@ def _exception_error(exc: Exception, stage: str) -> DownloadError:
         note = str(item)
         if re.search(r"\b429\b|too many requests", note, re.IGNORECASE):
             return _http_error(429, stage)
-        match = re.search(r"\b(?:HTTP\s+|status(?:\s+code)?[\s:=]+)([345]\d\d)\b|\b(401|403|404|500|502|503|504)\s+(?:Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b", note, re.IGNORECASE)
+        match = re.search(r"\b(?:HTTP(?:\s+Error)?\s+|status(?:\s+code)?[\s:=]+)([345]\d\d)\b|\b(401|403|404|500|502|503|504)\s+(?:Unauthorized|Forbidden|Not Found|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)\b", note, re.IGNORECASE)
         if match:
             return _http_error(int(match.group(1) or match.group(2)), stage)
         name = type(item).__name__

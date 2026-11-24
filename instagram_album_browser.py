@@ -21,7 +21,7 @@ def asset_key(url):
                 and any(p.hostname and p.hostname.endswith('.' + root)
                         for root in ('cdninstagram.com', 'fbcdn.net'))):
             return p.path
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         pass
     return None
 
@@ -95,6 +95,8 @@ def collect_album(page, shortcode, cover, max_items=8, seconds=35, denied=lambda
                     or p.path.rstrip('/') != '/p/' + shortcode):
                 raise AlbumError('ACCESS_DENIED: Public post no longer available.')
             nxt, prev = _controls(page, NEXT), _controls(page, PREV)
+            if page.locator('input[type="password"]:visible').count():
+                raise AlbumError('LOGIN_REQUIRED: Sign-in gate visible.')
             if len(nxt) > 1 or len(prev) > 1:
                 raise AlbumError('ALBUM_UNAVAILABLE: Ambiguous carousel.')
             anchor = (nxt or prev)
@@ -172,6 +174,10 @@ def read_public_album(shortcode, cover, max_items=8):
                                 blocked[0] = r.status
                 page.on('response', response)
                 res = page.goto('https://www.instagram.com/p/' + shortcode + '/', wait_until='commit', timeout=12000)
+                if res is not None and res.status == 429:
+                    blocked[0] = 429
+                elif res is not None and res.status in (401, 403):
+                    blocked[0] = res.status
                 if res is None or res.status != 200:
                     raise AlbumError('ALBUM_UNAVAILABLE: Public page unavailable.')
                 urls = collect_album(page, shortcode, cover, max_items=max_items,

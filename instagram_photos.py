@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 import ipaddress
+import os
 import re
 import socket
 import sys
@@ -210,7 +211,7 @@ class _PublicPhotoHead(HTMLParser):
         return image
 
 
-def _public_page_photo(shortcode: str) -> tuple[list[str], bool] | None:
+def _public_page_photo(shortcode: str, album_cover: list[str] | None = None) -> tuple[list[str], bool] | None:
     """One ordinary public page request; stop on denial or rate limiting."""
     parser = _PublicPhotoHead()
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -258,6 +259,11 @@ def _public_page_photo(shortcode: str) -> tuple[list[str], bool] | None:
                     return choices, bool(preview and choices == [preview])
                 if preview:
                     return [preview], True
+                # Only a verified ordinary public photo page can opt into the browser.
+                if (album_cover is not None and cover and parser._one("medium").lower() == "image"
+                        and not any(parser.meta.get(k) for k in ("og:video", "og:video:url", "og:video:secure_url"))):
+                    _validate_cdn(cover)
+                    album_cover.append(cover)
                 return None
     except DownloadError:
         raise
@@ -318,11 +324,23 @@ def _extension(prefix: bytes, content_type: str, video: bool) -> str:
 def download_post(url: str, target: Path) -> int:
     """Download up to eight ordered media files; leave no results on any failure."""
     shortcode = _shortcode(url)
-    public_photo = _public_page_photo(shortcode)
+    album_cover: list[str] = []
+    public_photo = _public_page_photo(shortcode, album_cover)
     if public_photo is not None:
         public_urls, preview_only = public_photo
         entries, user_agent = [(False, url) for url in public_urls], PUBLIC_PAGE_AGENT
         prefix = "instagram-onizleme" if preview_only else "instagram-fotograf"
+    elif album_cover and os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").lower() == "true":
+        # This is the first and only browser attempt; never fall back after a denial.
+        from instagram_album_browser import AlbumError, read_public_album
+        try:
+            urls, user_agent = read_public_album(shortcode, album_cover[0], MAX_ITEMS)
+        except AlbumError as exc:
+            raise DownloadError(str(exc)) from None
+        if not 2 <= len(urls) <= MAX_ITEMS:
+            raise DownloadError("ALBUM_UNAVAILABLE: Album tamamlanamadi.")
+        entries = [(False, media_url) for media_url in urls]
+        prefix = "instagram-fotograf"
     else:
         # A public page may identify a carousel, but never serve its cover alone.
         entries, user_agent = _metadata(shortcode)

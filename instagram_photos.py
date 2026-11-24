@@ -16,7 +16,7 @@ import requests
 from instaloader import InstaloaderContext, Post
 from instagram_public_media import _public_page_candidates
 
-MAX_ITEMS = 8
+MAX_ITEMS = 1
 MAX_SINGLE_BYTES = 30 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
 CDN_DOMAINS = ("cdninstagram.com", "fbcdn.net")
@@ -316,7 +316,7 @@ def _extension(prefix: bytes, content_type: str, video: bool) -> str:
 
 
 def download_post(url: str, target: Path) -> int:
-    """Download up to eight ordered media files; leave no results on any failure."""
+    """Download only the first permitted photo from a post; never bundle albums."""
     shortcode = _shortcode(url)
     public_photo = _public_page_photo(shortcode)
     if public_photo is not None:
@@ -327,6 +327,9 @@ def download_post(url: str, target: Path) -> int:
         # A public page may identify a carousel, but never serve its cover alone.
         entries, user_agent = _metadata(shortcode)
         prefix = "instagram"
+    entries = entries[:MAX_ITEMS]
+    if not entries:
+        raise DownloadError("EMPTY_MEDIA: Gonderide erisilebilir tek medya yok.")
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []

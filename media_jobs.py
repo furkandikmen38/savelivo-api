@@ -54,6 +54,11 @@ TASK_TIMEOUT = 75
 # Respect Instagram rate limits; do not retry while the provider is rejecting requests.
 INSTAGRAM_COOLDOWN_SECONDS = 15 * 60
 INSTAGRAM_BLOCKED_UNTIL = 0.0
+INSTAGRAM_RATE_LIMIT_MESSAGE = (
+    "Instagram bu indirme isteğini sınırlandırdı (429). "
+    "SaveLivo koruma amacıyla isteklere en az 15 dakika ara verir. "
+    "Bu süre, Instagram'ın erişimi o zaman açacağı anlamına gelmez."
+)
 MEDIA_SUFFIXES = {".mp4", ".m4v", ".webm", ".mov", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".mp3", ".m4a", ".wav", ".ogg", ".flac"}
 
 # A provider appearing here is eligible for an *attempt*, not guaranteed support.
@@ -131,10 +136,10 @@ def _validate_url(raw: str):
         # Only individual posts/reels. Stories generally need authenticated access,
         # which this no-login beta intentionally does not provide.
         safe = (len(parts) == 2 and parts[0] in ("p", "reel", "reels", "tv") and len(parts[1]) >= 4)
-        # Try the separate, cookie-free video extractor for public Reels.
-        # Keep photo/carousel posts on the existing bounded gallery route.
-        if safe and parts[0] in ("reel", "reels", "tv"):
-            provider = ("Instagram", "video")
+        # Public posts use the maintained anonymous photo/carousel resolver.
+        # Reels keep their separately tested video extractor.
+        if safe:
+            provider = ("Instagram", "instagram_photos" if parts[0] == "p" else "video")
     elif name == "TikTok":
         # A TikTok photo carousel is not a video. Route it to the bounded
         # gallery downloader; keep the already tested video route unchanged.
@@ -209,7 +214,10 @@ def _run_command(job: Job, engine: str):
     job.directory = base
     target = base / "indirilenler"
     target.mkdir()
-    if engine == "gallery":
+    if engine == "instagram_photos":
+        args = [sys.executable, str(Path(__file__).with_name("instagram_photos.py").resolve()),
+                job.url, str(target)]
+    elif engine == "gallery":
         args = [
             sys.executable, "-m", "gallery_dl", "--config-ignore", "--no-part", "--no-mtime",
             "--no-postprocessors", "--http-timeout", "12", "--retries",
@@ -217,10 +225,6 @@ def _run_command(job: Job, engine: str):
             "--range", "1-8", "--filesize-max", "30M", "--destination", str(target),
             job.url,
         ]
-        if job.platform == "Instagram":
-            # Official gallery-dl GraphQL mode for individual public photo posts.
-            # One attempt only: never retry a 429 or request user credentials.
-            args[-1:-1] = ["--option", "extractor.instagram.api=graphql"]
     else:
         args = [
             sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "--no-warnings",
@@ -235,36 +239,61 @@ def _run_command(job: Job, engine: str):
     exit_status = -1
     failure_note = "no stderr output"
     rate_limited = False
-    try:
-        # Never forward user-supplied cookies, profiles or credentials to a provider.
-        # Child processes must never inherit API credentials or Render secrets.
-        env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-               "LANG": "C.UTF-8", "HOME": str(base),
-               "XDG_CONFIG_HOME": str(base), "XDG_CACHE_HOME": str(base),
-               "PYTHONIOENCODING": "utf-8"}
-        for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
-            if os.environ.get(optional):
-                env[optional] = os.environ[optional]
-        with tempfile.TemporaryFile() as diagnostic_output:
+    timed_out = False
+    # Never forward user-supplied cookies, profiles or credentials to a provider.
+    # Child processes must never inherit API credentials or Render secrets.
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+           "LANG": "C.UTF-8", "HOME": str(base),
+           "XDG_CONFIG_HOME": str(base), "XDG_CACHE_HOME": str(base),
+           "PYTHONIOENCODING": "utf-8"}
+    for optional in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"):
+        if os.environ.get(optional):
+            env[optional] = os.environ[optional]
+    with tempfile.TemporaryFile() as diagnostic_output:
+        try:
             process = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=diagnostic_output,
                                      timeout=TASK_TIMEOUT, check=False, cwd=base, env=env)
             exit_status = process.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            # A provider may report 429 before the child reaches its time limit.
+            # Preserve that signal rather than presenting a generic timeout.
             diagnostic_output.seek(0, os.SEEK_END)
             diagnostic_output.seek(max(0, diagnostic_output.tell() - 12000))
             diagnostic_tail = diagnostic_output.read().decode("utf-8", "replace")
             failure_note = _safe_extractor_note(diagnostic_tail)
             rate_limited = (job.platform == "Instagram" and
                             bool(re.search(r"\b429\b|too many requests", diagnostic_tail, re.IGNORECASE)))
-    except subprocess.TimeoutExpired as exc:
-        LOG.error("SaveLivo extraction timeout platform=%s engine=%s", job.platform, engine)
-        raise ValueError("Islem suresi doldu. Daha kisa veya kucuk bir gonderi dene.") from exc
     if rate_limited:
         INSTAGRAM_BLOCKED_UNTIL = max(INSTAGRAM_BLOCKED_UNTIL, time.monotonic() + INSTAGRAM_COOLDOWN_SECONDS)
         LOG.warning("SaveLivo Instagram rate limited (429); cooldown_seconds=%d", INSTAGRAM_COOLDOWN_SECONDS)
+        shutil.rmtree(target, ignore_errors=True)
+        raise ValueError(INSTAGRAM_RATE_LIMIT_MESSAGE)
+    if timed_out:
+        LOG.error("SaveLivo extraction timeout platform=%s engine=%s", job.platform, engine)
+        shutil.rmtree(target, ignore_errors=True)
+        raise ValueError("İşlem süresi doldu. Kaynak bu süre içinde indirmeyi tamamlayamadı.")
+    if engine == "instagram_photos" and exit_status:
+        # Never serve a truncated file or a partial carousel as a completed job.
+        shutil.rmtree(target, ignore_errors=True)
+        LOG.error("SaveLivo extraction failed platform=%s engine=%s exit=%s detail=%s",
+                  job.platform, engine, exit_status, failure_note)
+        photo_errors = {
+            "LOGIN_REQUIRED": "Instagram bu gönderiye hesap girişi olmadan erişim sağlamadı.",
+            "MEDIA_TOO_LARGE": "Dosya boyutu sınırı aşıldı: dosya başına 30 MB, toplam 100 MB.",
+            "UNSUPPORTED_MEDIA": "Instagram geçerli ve desteklenen bir medya dosyası döndürmedi.",
+        }
+        message = next((text for code, text in photo_errors.items() if code in failure_note),
+                       "Instagram fotoğrafı hazırlanamadı. Gönderiye şu anda erişilemiyor.")
+        raise ValueError(message)
     root = target.resolve()
     files = []
     total = 0
-    for p in target.rglob("*"):
+    paths = target.rglob("*")
+    if engine == "instagram_photos":
+        paths = sorted(paths)
+    for p in paths:
         if not p.is_file() or p.is_symlink() or p.suffix.lower() not in MEDIA_SUFFIXES:
             continue
         if not p.resolve().is_relative_to(root):
@@ -281,8 +310,6 @@ def _run_command(job: Job, engine: str):
     if not files:
         LOG.error("SaveLivo extraction empty platform=%s engine=%s exit=%s detail=%s",
                   job.platform, engine, exit_status, failure_note)
-        if rate_limited:
-            raise ValueError("Instagram istegi 429 (cok fazla istek) nedeniyle reddetti. En az 15 dakika bekleyin. Erisimin acilmasi garanti degil.")
         raise ValueError("Erisilebilir medya bulunamadi. Platform giris veya izin gerektiriyor olabilir.")
     if exit_status:
         LOG.warning("SaveLivo extraction partial platform=%s engine=%s exit=%s detail=%s",
@@ -338,7 +365,8 @@ async def begin(body: StartBody, request: Request):
             minutes = max(1, (remaining + 59) // 60)
             raise HTTPException(
                 429,
-                f"Instagram gecici olarak istekleri sinirliyor (429). En az {minutes} dakika sonra tekrar deneyin; erisim garanti degildir.",
+                f"SaveLivo, Instagram'ın 429 yanıtından sonra tekrar denemeye {minutes} dakika ara verdi. "
+                "Bu koruma aralığıdır; Instagram kısıtının ne zaman biteceği bilinmiyor.",
                 headers={"Retry-After": str(remaining)},
             )
     if ACTIVE >= 1 or sum(x.status in ("queued", "working") for x in JOBS.values()) >= MAX_TASKS:
@@ -383,3 +411,4 @@ async def fetch_result(job_id: str, request: Request):
     filename = "savelivo-medya.zip" if suffix == ".zip" else "savelivo-" + _short_media_name(job.result, 80)
     return FileResponse(job.result, media_type=kind, filename=filename,
                         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+

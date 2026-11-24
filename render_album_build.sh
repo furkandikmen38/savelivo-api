@@ -6,6 +6,7 @@ python -m pip install -r requirements-album.txt
 export PLAYWRIGHT_BROWSERS_PATH=0
 python -m playwright install --only-shell chromium
 python -m py_compile instagram_album_browser.py instagram_photos.py media_jobs.py
+python -m unittest -v test_album_route
 # Abort the build if the installed browser cannot start in this environment.
 # No outbound Instagram request, no credentials and no provider traffic.
 python - <<'PY'

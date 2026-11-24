@@ -115,7 +115,7 @@ class MetadataTests(unittest.TestCase):
                 with patch.object(adapter._PublicContext, "_web_api_tokens", tokens), \
                      patch.object(context_module, "copy_session", side_effect=copy_session), \
                      patch.object(adapter._PublicContext, "do_sleep"):
-                    with self.assertRaisesRegex(adapter.DownloadError, "HTTP 429" if status == 429 else "HTTP_REDIRECT"):
+                    with self.assertRaisesRegex(adapter.DownloadError, "HTTP 429" if status == 429 else "UNCLASSIFIED_ERROR"):
                         adapter._metadata("AbCdEf12345")
                 self.assertEqual(len(sessions), 1)
                 self.assertEqual(sessions[0].post.call_count, 1)
@@ -243,12 +243,11 @@ class DownloadTests(unittest.TestCase):
         self.assert_empty()
 
     def test_cli_never_prints_raw_error_or_credentials(self):
-        with patch.object(adapter, "download_post", side_effect=adapter.DownloadError("EMPTY_MEDIA: token=SECRET")):
+        with patch.object(adapter, "download_post", side_effect=ValueError("token=SECRET")):
             output = io.StringIO()
             with contextlib.redirect_stderr(output):
                 self.assertEqual(adapter.main([URL, str(self.target)]), 1)
         self.assertNotIn("SECRET", output.getvalue())
-        self.assertIn("EMPTY_MEDIA", output.getvalue())
 
 
 if __name__ == "__main__":

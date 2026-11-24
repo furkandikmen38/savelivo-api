@@ -109,6 +109,8 @@ def _public_page_candidates(html, shortcode, cover, single, max_items):
         if single:
             same.extend((u, w) for u, w in _public_node_images(node) if _public_asset_key(u) == cover_key)
             continue
+        # A typed photo child may use a generic Relay typename. Its explicit
+        # media_type is authoritative unless other fields identify a video.
         items = node.get('carousel_media')
         count = node.get('carousel_media_count')
         if not isinstance(items, list):
@@ -116,17 +118,27 @@ def _public_page_candidates(html, shortcode, cover, single, max_items):
             if not isinstance(side, dict) or not isinstance(side.get('edges'), list):
                 continue
             page_info = side.get('page_info')
-            if isinstance(page_info, dict) and page_info.get('has_next_page') is not False:
+            if isinstance(page_info, dict) and (page_info.get('has_next_page') is not False
+                    or page_info.get('has_previous_page') is True):
                 continue
             items = [e.get('node') if isinstance(e, dict) else None for e in side['edges']]
             count = side.get('count')
+            if count is None and isinstance(page_info, dict) and page_info.get('has_next_page') is False and page_info.get('has_previous_page') is False:
+                count = len(items)
+        if isinstance(count, str) and re.fullmatch(r'[1-9][0-9]{0,4}', count):
+            count = int(count)
         if type(count) is not int or count != len(items) or not 2 <= count <= max_items:
             continue
         chosen = []
         for item in items:
-            if (not isinstance(item, dict) or item.get('is_video') is True
-                    or item.get('media_type') not in (None, 1)
-                    or item.get('__typename') not in (None, 'GraphImage', 'XDTGraphImage')):
+            if not isinstance(item, dict):
+                break
+            media_type = item.get('media_type')
+            typename = item.get('__typename')
+            if (item.get('is_video') is True or item.get('video_url') or item.get('video_versions')
+                    or (isinstance(typename, str) and 'video' in typename.lower())
+                    or (media_type is not None and (type(media_type) is not int or media_type != 1))
+                    or (media_type is None and typename not in (None, 'GraphImage', 'XDTGraphImage'))):
                 break
             candidates = _public_node_images(item)
             if not candidates:

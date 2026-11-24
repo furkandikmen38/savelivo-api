@@ -259,11 +259,15 @@ def _public_page_photo(shortcode: str, album_cover: list[str] | None = None) -> 
                     return choices, bool(preview and choices == [preview])
                 if preview:
                     return [preview], True
-                # Only a verified ordinary public photo page can opt into the browser.
-                if (album_cover is not None and cover and parser._one("medium").lower() == "image"
+                # parser.photo already verified the public post identity and og:image.
+                # A carousel may omit medium or include several og:image values.
+                # Browser validation must still prove the first image and complete album.
+                if (album_cover is not None and parser._one("medium").strip().lower() not in ("video", "movie")
                         and not any(parser.meta.get(k) for k in ("og:video", "og:video:url", "og:video:secure_url"))):
-                    _validate_cdn(cover)
-                    album_cover.append(cover)
+                    candidate = cover or parser.meta.get("og:image", [""])[0]
+                    if candidate:
+                        _validate_cdn(candidate)
+                        album_cover.append(candidate)
                 return None
     except DownloadError:
         raise
@@ -330,7 +334,7 @@ def download_post(url: str, target: Path) -> int:
         public_urls, preview_only = public_photo
         entries, user_agent = [(False, url) for url in public_urls], PUBLIC_PAGE_AGENT
         prefix = "instagram-onizleme" if preview_only else "instagram-fotograf"
-    elif album_cover and os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").lower() == "true":
+    elif album_cover and os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").strip().lower() == "true":
         # This is the first and only browser attempt; never fall back after a denial.
         from instagram_album_browser import AlbumError, read_public_album
         try:
@@ -343,7 +347,12 @@ def download_post(url: str, target: Path) -> int:
         prefix = "instagram-fotograf"
     else:
         # A public page may identify a carousel, but never serve its cover alone.
-        entries, user_agent = _metadata(shortcode)
+        try:
+            entries, user_agent = _metadata(shortcode)
+        except DownloadError as exc:
+            enabled = os.environ.get("ENABLE_INSTAGRAM_ALBUM_BROWSER", "false").strip().lower() == "true"
+            reason = "no_verified_photo_cover" if enabled else "disabled"
+            raise DownloadError(f"{exc} album_browser={reason}") from None
         prefix = "instagram"
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)

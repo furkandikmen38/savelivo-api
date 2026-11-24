@@ -15,15 +15,17 @@ import os
 import re
 import secrets
 import socket
+import tempfile
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 BASE = Path(__file__).resolve().parent
 VIDEO = BASE / "ornek.mp4"
@@ -38,6 +40,14 @@ ALLOWED_HOSTS.add("interactive-examples.mdn.mozilla.net")
 # Direct public media can be added by the service administrator only.
 # Platform pages use the separate, strictly bounded experimental adapters.
 ALLOWED_HOSTS.add("upload.wikimedia.org")
+# Explicit public image archives; no social-media hosts or arbitrary proxies.
+PUBLIC_IMAGE_PATHS = {
+    "science.nasa.gov": "/wp-content/uploads/",
+    "images-assets.nasa.gov": "/image/",
+    "esawebb.org": "/media/archives/images/",
+}
+CHECKED_IMAGE_EXT = {"jpg", "jpeg", "png"}
+DIRECT_IMAGE_SLOTS = asyncio.Semaphore(3)
 CORS_ORIGINS = [x.strip() for x in os.getenv("CORS_ORIGINS", "https://super-selkie-f65d2d.netlify.app").split(",") if x.strip()]
 SECRET = os.getenv("DOWNLOAD_TOKEN_SECRET", "").encode("utf-8") or secrets.token_bytes(32)
 
@@ -88,9 +98,9 @@ def parse_media_url(value: str):
     return p, host, extension
 
 
-def verify_public_hostname(host: str) -> None:
+def verify_public_hostname(host: str, *, image_archive: bool = False) -> None:
     # The approved domain list is intentionally exact, not arbitrary hostnames.
-    if host not in ALLOWED_HOSTS:
+    if host not in ALLOWED_HOSTS and not (image_archive and host in PUBLIC_IMAGE_PATHS):
         raise HTTPException(403, "Bu test sunucusunda yaln\u0131zca izin verilen dosya sunucular\u0131 a\u00e7\u0131kt\u0131r.")
     try:
         addr = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
@@ -98,6 +108,96 @@ def verify_public_hostname(host: str) -> None:
         raise HTTPException(422, "Alan ad\u0131na ula\u015f\u0131lamad\u0131.") from ex
     if not addr or any(not ipaddress.ip_address(a[4][0]).is_global for a in addr):
         raise HTTPException(403, "Bu sunucu adresi g\u00fcvenlik nedeniyle engellendi.")
+
+
+def verify_direct_source(p, host: str, extension: str) -> None:
+    prefix = PUBLIC_IMAGE_PATHS.get(host)
+    if prefix:
+        path = unquote(p.path)
+        if (extension not in CHECKED_IMAGE_EXT or not path.startswith(prefix)
+                or p.query or p.fragment or "\\" in path
+                or any(part in (".", "..") for part in path.split("/"))
+                or any(ord(ch) < 32 for ch in path)):
+            raise HTTPException(403, "Bu arsivde yalnizca dogrudan JPG/PNG dosyalari desteklenir.")
+        verify_public_hostname(host, image_archive=True)
+    else:
+        verify_public_hostname(host)
+
+
+def _image_type_ok(ctype: str, extension: str) -> bool:
+    return ctype in (MIME[extension], "application/octet-stream")
+
+
+def _check_image_markers(file, extension: str, total: int) -> None:
+    # Validate basic JPEG/PNG file markers, not a full image decode.
+    file.seek(0)
+    header = file.read(8)
+    if extension in ("jpg", "jpeg"):
+        valid = total >= 4 and header.startswith(b"\xff\xd8\xff")
+        if valid:
+            file.seek(-2, os.SEEK_END)
+            valid = file.read(2) == b"\xff\xd9"
+    else:
+        valid = total >= 20 and header == b"\x89PNG\r\n\x1a\n"
+        if valid:
+            file.seek(-12, os.SEEK_END)
+            valid = file.read(12) == b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
+    if not valid:
+        raise HTTPException(422, "Kaynak gecerli veya eksiksiz bir JPG/PNG dosyasi donmedi.")
+    file.seek(0)
+
+
+async def _download_checked_image(url: str, extension: str, name: str):
+    if DIRECT_IMAGE_SLOTS.locked():
+        raise HTTPException(503, "Gorsel indirme kapasitesi dolu. Daha sonra tekrar dene.")
+    file = tempfile.TemporaryFile(mode="w+b")
+    try:
+        async with DIRECT_IMAGE_SLOTS:
+            async with asyncio.timeout(30):
+                async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as client:
+                    async with client.stream("GET", url, headers={"User-Agent": "SaveLivo/0.3", "Accept-Encoding": "identity"}) as resp:
+                        if resp.status_code == 429:
+                            raise HTTPException(429, "Kaynak gorsel isteklerini sinirladi. Daha sonra tekrar dene.")
+                        if resp.status_code != 200:
+                            raise HTTPException(422, "Kaynak gorseli indirmeye izin vermedi veya dosya bulunamadi.")
+                        ctype = resp.headers.get("content-type", "").lower().split(";", 1)[0].strip()
+                        if not _image_type_ok(ctype, extension):
+                            raise HTTPException(422, "Kaynak beklenen gorsel turunu donmedi.")
+                        if resp.headers.get("content-encoding", "identity").lower() != "identity":
+                            raise HTTPException(422, "Beklenmeyen dosya kodlamasi.")
+                        try:
+                            expected = int(resp.headers.get("content-length", "0"))
+                        except ValueError:
+                            expected = 0
+                        if expected > MAX_SIZE:
+                            raise HTTPException(413, "Tek dosya siniri 40 MB.")
+                        total = 0
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            total += len(chunk)
+                            if total > MAX_SIZE:
+                                raise HTTPException(413, "Tek dosya siniri 40 MB.")
+                            file.write(chunk)
+                        if expected > 0 and total != expected:
+                            raise HTTPException(502, "Gorsel aktarimi tamamlanamadi.")
+                _check_image_markers(file, extension, total)
+    except (httpx.HTTPError, TimeoutError) as exc:
+        file.close()
+        raise HTTPException(502, "Kaynak gorsel aktarimi tamamlanamadi.") from exc
+    except BaseException:
+        file.close()
+        raise
+
+    def chunks():
+        try:
+            while chunk := file.read(65536):
+                yield chunk
+        finally:
+            file.close()
+    return StreamingResponse(chunks(), media_type=MIME[extension],
+        headers={"Content-Length": str(total),
+                 "Content-Disposition": f'attachment; filename="{name}"',
+                 "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        background=BackgroundTask(file.close))
 
 
 def issue_ticket(url: str) -> str:
@@ -188,7 +288,7 @@ async def analyze(body: AnalyzeBody, request: Request):
         return {"durum": "desteklenmiyor", "platform": "Di\u011fer", "aciklama": "Bu ba\u011flant\u0131 do\u011frudan desteklenen bir medya dosyas\u0131 de\u011fil.", "secenekler": []}
     if not body.izin_var:
         return {"durum": "izin_gerekli", "platform": "Do\u011frudan medya", "aciklama": "\u0130ndirmek i\u00e7in i\u00e7erik sahibi oldu\u011funu veya indirme iznin bulundu\u011funu onayla.", "secenekler": []}
-    verify_public_hostname(host)
+    verify_direct_source(p, host, extension)
     url = p.geturl()
     try:
         async with httpx.AsyncClient(timeout=12, follow_redirects=False, trust_env=False) as client:
@@ -202,6 +302,8 @@ async def analyze(body: AnalyzeBody, request: Request):
         raise HTTPException(422, "Bu medya turu indirilebilir degil.")
     if ctype == "image/svg+xml":
         raise HTTPException(422, "SVG bu surumde desteklenmiyor.")
+    if extension in CHECKED_IMAGE_EXT and not _image_type_ok(ctype, extension):
+        raise HTTPException(422, "Kaynak beklenen gorsel turunu donmedi.")
     try:
         size = int(resp.headers.get("content-length", "0"))
     except ValueError:
@@ -220,8 +322,12 @@ async def download(ticket: str):
     p, host, extension = parse_media_url(url)
     if extension not in MEDIA_EXT:
         raise HTTPException(422, "Desteklenmeyen dosya t\u00fcr\u00fc.")
-    verify_public_hostname(host)
+    verify_direct_source(p, host, extension)
     name = re.sub(r"[^A-Za-z0-9_.-]", "_", p.path.rsplit("/", 1)[-1])[:100] or ("video." + extension)
+    if extension in CHECKED_IMAGE_EXT:
+        # Preserve the suffix even when the original archive filename is long.
+        name = (re.sub(r"[^A-Za-z0-9_-]", "_", unquote(p.path.rsplit("/", 1)[-1]).rsplit(".", 1)[0])[:85] or "SaveLivo") + "." + extension
+        return await _download_checked_image(url, extension, name)
     # We refuse redirects and private hosts; untrusted URL proxying is disabled.
     async def streamer():
         consumed = 0

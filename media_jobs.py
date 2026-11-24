@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from secrets import token_urlsafe
@@ -46,7 +45,7 @@ def require_owner(request: Request) -> None:
     if not owner_authenticated(request):
         raise HTTPException(403, "Yonetici test anahtari hatali veya eksik.")
 MAX_TASKS = 3
-MAX_ITEMS = 8
+MAX_ITEMS = 1
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
 MAX_SINGLE_BYTES = 30 * 1024 * 1024
 TASK_TTL = 15 * 60
@@ -222,7 +221,7 @@ def _run_command(job: Job, engine: str):
             sys.executable, "-m", "gallery_dl", "--config-ignore", "--no-part", "--no-mtime",
             "--no-postprocessors", "--http-timeout", "12", "--retries",
             "0" if job.platform == "Instagram" else "1",
-            "--range", "1-8", "--filesize-max", "30M", "--destination", str(target),
+            "--range", "1-1", "--filesize-max", "30M", "--destination", str(target),
             job.url,
         ]
     else:
@@ -315,17 +314,11 @@ def _run_command(job: Job, engine: str):
     if exit_status:
         LOG.warning("SaveLivo extraction partial platform=%s engine=%s exit=%s detail=%s",
                     job.platform, engine, exit_status, failure_note)
-    job.count = len(files)
-    if len(files) == 1:
-        job.result = files[0]
-    else:
-        bundle = base / "savelivo-medya.zip"
-        with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as output:
-            for i, p in enumerate(files, 1):
-                # Long post captions must not truncate the file extension.
-                name = f"{i:02d}-{_short_media_name(p, 90)}"
-                output.write(p, arcname=name)
-        job.result = bundle
+    if len(files) != 1:
+        shutil.rmtree(target, ignore_errors=True)
+        raise ValueError("Toplu indirme kapalı. Lütfen tek bir video veya tek fotoğraf bağlantısı kullan.")
+    job.count = 1
+    job.result = files[0]
 
 
 async def _worker(job: Job, engine: str):
@@ -352,7 +345,7 @@ async def capabilities():
     return {"durum": "hazir", "deneysel_platformlar_aktif": EXPERIMENTAL,
             "dosya_turleri": sorted(MEDIA_SUFFIXES),
             "platformlar": sorted(TEST_PROVIDERS), "sadece_yonetici": True, "dosya_siniri_mb": 30,
-            "tek_islem_dosya_siniri": MAX_ITEMS, "not": "Listede olmasi indirilebilirlik garantisi degildir."}
+            "tek_islem_dosya_siniri": 1, "not": "Tek video veya tek fotoğraf. Albüm, çoklu dosya ve ZIP toplu indirmesi kapalıdır."}
 
 
 @router.post("/hazirla")

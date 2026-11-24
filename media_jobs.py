@@ -290,9 +290,7 @@ def _run_command(job: Job, engine: str):
     root = target.resolve()
     files = []
     total = 0
-    paths = target.rglob("*")
-    if engine == "instagram_photos":
-        paths = sorted(paths)
+    paths = sorted(target.rglob("*"))
     for p in paths:
         if not p.is_file() or p.is_symlink() or p.suffix.lower() not in MEDIA_SUFFIXES:
             continue

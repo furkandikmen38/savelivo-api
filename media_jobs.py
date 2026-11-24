@@ -281,6 +281,7 @@ def _run_command(job: Job, engine: str):
                   job.platform, engine, exit_status, failure_note)
         photo_errors = {
             "LOGIN_REQUIRED": "Instagram bu gönderiye hesap girişi olmadan erişim sağlamadı.",
+            "PUBLIC_PAGE_UNAVAILABLE": "Instagram gonderisinin herkese acik sayfa bilgileri dogrulanamadi.",
             "MEDIA_TOO_LARGE": "Dosya boyutu sınırı aşıldı: dosya başına 30 MB, toplam 100 MB.",
             "UNSUPPORTED_MEDIA": "Instagram geçerli ve desteklenen bir medya dosyası döndürmedi.",
         }
@@ -333,7 +334,10 @@ async def _worker(job: Job, engine: str):
     try:
         await asyncio.to_thread(_run_command, job, engine)
         job.status = "ready"
-        job.description = f"{job.count} medya dosyasi hazir."
+        if engine == "instagram_photos" and job.result and job.result.name.startswith("instagram-onizleme-"):
+            job.description = "1 herkese acik paylasim onizleme gorseli hazir. Orijinal cozunurluk veya albumun tamami garanti edilmez."
+        else:
+            job.description = f"{job.count} medya dosyasi hazir."
     except Exception as exc:
         job.status = "failed"
         job.description = str(exc) if isinstance(exc, ValueError) else "Kaynak islenemedi. Baglanti veya platform kisiti olabilir."

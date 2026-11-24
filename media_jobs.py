@@ -131,6 +131,10 @@ def _validate_url(raw: str):
         # Only individual posts/reels. Stories generally need authenticated access,
         # which this no-login beta intentionally does not provide.
         safe = (len(parts) == 2 and parts[0] in ("p", "reel", "reels", "tv") and len(parts[1]) >= 4)
+        # Try the separate, cookie-free video extractor for public Reels.
+        # Keep photo/carousel posts on the existing bounded gallery route.
+        if safe and parts[0] in ("reel", "reels", "tv"):
+            provider = ("Instagram", "video")
     elif name == "TikTok":
         # A TikTok photo carousel is not a video. Route it to the bounded
         # gallery downloader; keep the already tested video route unchanged.
@@ -218,7 +222,9 @@ def _run_command(job: Job, engine: str):
             sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "--no-warnings",
             "--restrict-filenames", "--no-part", "--no-mtime", "--no-cache-dir", "--no-playlist",
             "--max-downloads", "1", "--max-filesize", "30M", "--socket-timeout", "12",
-            "--retries", "1", "--fragment-retries", "1", "--format", "b[ext=mp4]/b",
+            "--retries", "0" if job.platform == "Instagram" else "1",
+            "--fragment-retries", "0" if job.platform == "Instagram" else "1",
+            "--format", "b[ext=mp4]/b",
             "--output", str(target / "%(title).60s-%(id)s.%(ext)s"), job.url,
         ]
     # Use a temporary file so verbose extractor output cannot grow in memory.

@@ -26,6 +26,13 @@ Bu motorun platformlarda gerçekten indirme yapabildiği canlı olarak doğrulan
 6. Web sitesinde `Instagram / TikTok özel test modu` bölümünü açın, Render'da seçtiğiniz
    anahtarı yalnızca kendi tarayıcınızda girin; izin verilen kendi tekil gönderinizi deneyin.
 
+## İndirme davranışı
+
+- Video indirme alanları korunur.
+- Fotoğraf bağlantılarında tek fotoğraf indirilir.
+- Carousel/albüm bağlantılarında yalnızca ilk fotoğraf sunulur.
+- Birden fazla dosya, ZIP veya toplu indirme üretilmez.
+
 ## Notlar
 
 - `ENABLE_PUBLIC_EXTRACTORS` = false veya test anahtarı yok/24 karakterden kısa ise

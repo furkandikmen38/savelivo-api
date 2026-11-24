@@ -93,8 +93,9 @@ class CommandTests(unittest.TestCase):
         seen = {}
         def run(args, **kwargs):
             seen["args"] = args
-            (Path(args[-1]) / "first.jpg").write_bytes(b"\xff\xd8\xfffirst")
-            (Path(args[-1]) / "second.jpg").write_bytes(b"\xff\xd8\xffsecond")
+            target = Path(args[args.index("--destination") + 1])
+            (target / "first.jpg").write_bytes(b"\xff\xd8\xfffirst")
+            (target / "second.jpg").write_bytes(b"\xff\xd8\xffsecond")
             return SimpleNamespace(returncode=0)
 
         with patch.object(jobs.subprocess, "run", side_effect=run):

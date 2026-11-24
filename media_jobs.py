@@ -217,6 +217,10 @@ def _run_command(job: Job, engine: str):
             "--range", "1-8", "--filesize-max", "30M", "--destination", str(target),
             job.url,
         ]
+        if job.platform == "Instagram":
+            # Official gallery-dl GraphQL mode for individual public photo posts.
+            # One attempt only: never retry a 429 or request user credentials.
+            args[-1:-1] = ["--option", "extractor.instagram.api=graphql"]
     else:
         args = [
             sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-progress", "--no-warnings",

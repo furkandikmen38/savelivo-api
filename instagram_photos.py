@@ -1,10 +1,12 @@
-"""Bounded anonymous Instagram post downloads using Instaloader 4.16 metadata."""
+"""Bounded public Instagram photo previews and anonymous post metadata."""
 from __future__ import annotations
 
+import codecs
 import ipaddress
 import re
 import socket
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -143,6 +145,99 @@ def _media(post: Post) -> list[tuple[bool, str]]:
     return entries
 
 
+PUBLIC_PAGE_AGENT = "SaveLivo/0.3"
+MAX_PUBLIC_HEAD = 2 * 1024 * 1024
+
+
+class _PublicPhotoHead(HTMLParser):
+    """Only read standard public link-preview metadata, not private API data."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.meta: dict[str, list[str]] = {}
+        self.canonical: list[str] = []
+        self.done = False
+
+    def handle_starttag(self, tag, attrs):
+        if self.done:
+            return
+        attrs = dict(attrs)
+        if tag == "meta":
+            key = (attrs.get("property") or attrs.get("name") or "").lower()
+            value = attrs.get("content") or ""
+            if key in ("og:site_name", "og:type", "og:url", "og:image", "medium", "twitter:title", "og:video", "og:video:url", "og:video:secure_url") and value:
+                self.meta.setdefault(key, []).append(value)
+        elif tag == "link" and "canonical" in (attrs.get("rel") or "").lower().split():
+            self.canonical.append(attrs.get("href") or "")
+        elif tag == "body":
+            self.done = True
+
+    def handle_endtag(self, tag):
+        if tag == "head":
+            self.done = True
+
+    def _one(self, key):
+        values = set(self.meta.get(key, ()))
+        return next(iter(values)) if len(values) == 1 else ""
+
+    def photo(self, shortcode: str) -> str | None:
+        def same_post(value):
+            try:
+                p = urlsplit(value)
+                return (p.scheme == "https" and p.hostname in ("instagram.com", "www.instagram.com")
+                        and p.port in (None, 443) and not p.username and not p.password
+                        and re.fullmatch(r"/(?:[A-Za-z0-9_.]+/)?p/" + re.escape(shortcode) + r"/?", p.path) is not None)
+            except ValueError:
+                return False
+
+        identities = self.canonical + self.meta.get("og:url", [])
+        if (not self.done or not identities or not all(same_post(x) for x in identities)
+                or self._one("og:site_name").lower() != "instagram"
+                or self._one("og:type").lower() != "article"
+                or not self.meta.get("og:image")):
+            raise DownloadError("PUBLIC_PAGE_UNAVAILABLE: Gonderinin acik sayfa bilgileri dogrulanamadi.")
+        # Never treat a carousel cover or a video thumbnail as a complete photo post.
+        if (self._one("medium").lower() != "image"
+                or not self._one("twitter:title").lower().endswith("instagram photo")
+                or any(self.meta.get(k) for k in ("og:video", "og:video:url", "og:video:secure_url"))):
+            return None
+        image = self._one("og:image")
+        if not image:
+            return None
+        _validate_cdn(image)
+        return image
+
+
+def _public_page_photo(shortcode: str) -> str | None:
+    """One ordinary public page request; stop on denial or rate limiting."""
+    parser = _PublicPhotoHead()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    received = 0
+    try:
+        with httpx.Client(timeout=12, follow_redirects=False, trust_env=False,
+                          headers={"User-Agent": PUBLIC_PAGE_AGENT, "Accept": "text/html",
+                                   "Accept-Language": "en-US,en;q=0.8"}) as client:
+            with client.stream("GET", f"https://www.instagram.com/p/{shortcode}/") as response:
+                if response.status_code != 200:
+                    raise _http_error(response.status_code, "public_page", response.headers.get("Location", ""))
+                if response.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/html":
+                    raise DownloadError("RESPONSE_FORMAT_ERROR: stage=public_page")
+                for chunk in response.iter_bytes(chunk_size=16384):
+                    received += len(chunk)
+                    if received > MAX_PUBLIC_HEAD:
+                        raise DownloadError("PUBLIC_PAGE_UNAVAILABLE: Sayfa basligi boyut sinirini asti.")
+                    parser.feed(decoder.decode(chunk))
+                    if parser.done:
+                        break
+                if not parser.done:
+                    parser.feed(decoder.decode(b"", final=True))
+                    parser.close()
+                return parser.photo(shortcode)
+    except DownloadError:
+        raise
+    except Exception as exc:
+        raise _exception_error(exc, "public_page") from None
+
+
 def _metadata(shortcode: str) -> tuple[list[tuple[bool, str]], str]:
     context = _PublicContext(quiet=True, max_connection_attempts=1,
                              request_timeout=12, iphone_support=False,
@@ -195,7 +290,15 @@ def _extension(prefix: bytes, content_type: str, video: bool) -> str:
 
 def download_post(url: str, target: Path) -> int:
     """Download up to eight ordered media files; leave no results on any failure."""
-    entries, user_agent = _metadata(_shortcode(url))
+    shortcode = _shortcode(url)
+    public_photo = _public_page_photo(shortcode)
+    if public_photo is not None:
+        entries, user_agent = [(False, public_photo)], PUBLIC_PAGE_AGENT
+        prefix = "instagram-onizleme"
+    else:
+        # A public page may identify a carousel, but never serve its cover alone.
+        entries, user_agent = _metadata(shortcode)
+        prefix = "instagram"
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
@@ -215,7 +318,7 @@ def download_post(url: str, target: Path) -> int:
                     chunks = response.iter_bytes(chunk_size=65536)
                     first = next(chunks, b"")
                     extension = _extension(first, response.headers.get("content-type", ""), video)
-                    final = target / f"instagram-{index:02d}.{extension}"
+                    final = target / f"{prefix}-{index:02d}.{extension}"
                     partial = final.with_suffix(final.suffix + ".part")
                     if final.exists():
                         raise DownloadError("TARGET_EXISTS: Hedef dosya zaten var.")

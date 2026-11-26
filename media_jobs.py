@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api")
 # Two independent switches: never open an unprotected downloader on the public API.
 OWNER_KEY = os.environ.get("SAVELIVO_TEST_KEY", "").strip()
 EXPERIMENTAL = (os.environ.get("ENABLE_PUBLIC_EXTRACTORS", "false").lower() == "true" and len(OWNER_KEY) >= 24)
-TEST_PROVIDERS = {"Instagram", "TikTok"}
+TEST_PROVIDERS = {"Instagram", "TikTok", "Vimeo"}
 
 
 def owner_authenticated(request: Request) -> bool:
@@ -58,6 +58,7 @@ PROVIDERS = {
     "TikTok": (("tiktok.com",), "video"),
     "Pinterest": (("pinterest.com", "pin.it"), "gallery"),
     "Reddit": (("reddit.com", "redd.it"), "gallery"),
+    # Only public, individual Vimeo video URLs are eligible for the bounded test adapter.
     "Vimeo": (("vimeo.com",), "video"),
     "Dailymotion": (("dailymotion.com", "dai.ly"), "video"),
     "Twitch": (("twitch.tv", "clips.twitch.tv"), "video"),
@@ -110,7 +111,7 @@ def _validate_url(raw: str):
         raise HTTPException(422, "Yalnizca gecerli HTTPS baglantilari kullanilabilir.")
     provider = detect_provider(host)
     if not provider or provider[0] not in TEST_PROVIDERS:
-        raise HTTPException(422, "Ozel test su anda yalnizca Instagram ve TikTok gonderileri icin acik.")
+        raise HTTPException(422, "Ozel test su anda yalnizca Instagram, TikTok ve Vimeo tekil video baglantilari icin acik.")
     try:
         addresses = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
         if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):

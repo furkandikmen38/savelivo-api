@@ -41,7 +41,7 @@ ALLOWED_HOSTS.add("upload.wikimedia.org")
 CORS_ORIGINS = [x.strip() for x in os.getenv("CORS_ORIGINS", "https://super-selkie-f65d2d.netlify.app").split(",") if x.strip()]
 SECRET = os.getenv("DOWNLOAD_TOKEN_SECRET", "").encode("utf-8") or secrets.token_bytes(32)
 
-app = FastAPI(title="SaveLivo API", version="0.3.1", docs_url="/api/docs")
+app = FastAPI(title="SaveLivo API", version="0.3.2", docs_url="/api/docs")
 from media_jobs import EXPERIMENTAL, detect_provider, owner_authenticated, router as social_router
 app.include_router(social_router)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "X-SaveLivo-Test-Key"], allow_credentials=False)
@@ -130,7 +130,7 @@ class AnalyzeBody(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"durum": "calisiyor", "surum": "0.3.1", "ornek_video": True, "ornek_fotograf": True, "deneysel_platformlar_aktif": EXPERIMENTAL}
+    return {"durum": "calisiyor", "surum": "0.3.2", "ornek_video": True, "ornek_fotograf": True, "deneysel_platformlar_aktif": EXPERIMENTAL}
 
 
 @app.get("/api/ornek")
@@ -171,7 +171,7 @@ async def analyze(body: AnalyzeBody, request: Request):
     platform = platform_for(host)
     if platform:
         public = detect_provider(host)
-        if public and public[0] in ("Instagram", "TikTok") and body.izin_var and owner_authenticated(request):
+        if public and public[0] in ("Instagram", "TikTok", "Vimeo") and body.izin_var and owner_authenticated(request):
             return {"durum": "hazirlama_gerekli", "platform": platform,
                     "aciklama": ("Bu baglanti icin deneysel kamuya acik medya motoru denenebilir. "
                                  "Calismasi garanti degildir; sadece erisilebilir ve izinli icerikler."),
@@ -250,7 +250,7 @@ input[type=url]{width:100%;padding:14px;box-sizing:border-box;border:1px solid #
 button,a.btn{background:#6d3df5;color:white;border:0;border-radius:10px;padding:12px 16px;cursor:pointer;text-decoration:none;display:inline-block}
 .small{color:#657085;font-size:13px;line-height:1.6}#output{margin-top:18px;padding:15px;border-radius:10px;background:#f3f0ff;white-space:pre-wrap;overflow-wrap:anywhere}
 </style><main><h1>Save<b>Livo</b> API</h1>
-<p>SaveLivo 0.3.1 beta: video, fotograf ve ses dosyalarinin baglanti analizi. Ornek dosyalar test amaclidir.</p>
+<p>SaveLivo 0.3.2 beta: video, fotograf ve ses dosyalarinin baglanti analizi. Ornek dosyalar test amaclidir.</p>
 <p><a class='btn' href='/ornek.mp4?indir=1'>Ornek MP4 indir</a> &nbsp; <a class='btn' href='/ornek-fotograf.png?indir=1'>Ornek PNG indir</a> &nbsp; <a href='/api/health'>Sunucu durumu</a></p>
 <hr><h3>Baglanti testi</h3><form id='f'><input type='url' id='url' placeholder='https://...' required>
 <label><input type='checkbox' id='rights'> Bu icerigi indirme hakkim veya iznim var.</label><p><button>Baglantiyi analiz et</button></p></form><div id='output' hidden></div>
